@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <p>it works</p>
+  <p><a href="{{ url_for('about') }}">About this project</a></p>
+  {% if rows %}
+  <table>
+    <tr>
+      {% for column in rows[0].keys() %}
+      <th>{{ column }}</th>
+      {% endfor %}
+    </tr>
+    {% for row in rows %}
+    <tr>
+      {% for value in row.values() %}
+      <td>{{ value|round(3) if value is float else value }}</td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p>No data available right now.</p>
+  {% endif %}
+{% endblock %}

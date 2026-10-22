@@ -1,0 +1,29 @@
+body {
+  background-color: #000;
+  color: #f2f2f2;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  margin: 2rem;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 0.5rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid #333;
+}
+
+th {
+  background-color: #1f1f1f;
+}
+
+tr:nth-child(even) td {
+  background-color: #141414;
+}
+
+tr:hover td {
+  background-color: #2a2a2a;
+}
