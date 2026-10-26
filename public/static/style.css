@@ -140,7 +140,7 @@ tr:hover td {
   padding: 0.5rem 1rem;
   font-weight: 700;
   cursor: pointer;
-  white-space: nowrap;
+  line-height: 1.3;
 }
 
 .sortable th button:hover {
@@ -153,23 +153,23 @@ tr:hover td {
 }
 
 .sortable th button::after {
-  content: " ↕";
+  content: "\00a0↕";
   color: #666;
 }
 
 .sortable th[aria-sort="descending"] button::after {
-  content: " ▼";
+  content: "\00a0▼";
   color: #ff9bb3;
 }
 
 .sortable th[aria-sort="ascending"] button::after {
-  content: " ▲";
+  content: "\00a0▲";
   color: #ff9bb3;
 }
 
 .table-note {
   color: #cfcfcf;
-  max-width: 70ch;
+  max-width: none;
 }
 
 .rank {

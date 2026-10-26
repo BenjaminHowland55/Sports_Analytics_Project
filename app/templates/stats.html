@@ -3,19 +3,19 @@
 {% block title %}Stats{% endblock %}
 
 {% block content %}
-  {# (column, has a league rank) #}
+  {# (database column, label shown on the page, has a league rank) #}
   {% set columns = [
-    ("season", false),
-    ("plays", false),
-    ("epa_per_play_allowed", true),
-    ("pass_epa_per_dropback_allowed", true),
-    ("rush_epa_per_carry_allowed", true),
-    ("explosive_play_rate_allowed", true),
-    ("pressure_rate", true),
-    ("four_man_pressure_rate", true),
-    ("clean_pocket_epa_allowed", true),
-    ("blitz_rate", false),
-    ("man_coverage_rate", false),
+    ("season", "Season", false),
+    ("plays", "Plays", false),
+    ("epa_per_play_allowed", "EPA per Play Allowed", true),
+    ("pass_epa_per_dropback_allowed", "Pass EPA per Dropback Allowed", true),
+    ("rush_epa_per_carry_allowed", "Rush EPA per Carry Allowed", true),
+    ("explosive_play_rate_allowed", "Explosive Play Rate Allowed", true),
+    ("pressure_rate", "Pressure Rate", true),
+    ("four_man_pressure_rate", "4-Man Rush Pressure Rate", true),
+    ("clean_pocket_epa_allowed", "Clean-Pocket EPA Allowed", true),
+    ("blitz_rate", "Blitz Rate", false),
+    ("man_coverage_rate", "Man Coverage Rate", false),
   ] %}
   <h1>Arizona Cardinals Defense by Season</h1>
   {% if rows %}
@@ -30,9 +30,9 @@
     <table class="sortable">
       <thead>
         <tr>
-          {% for key, ranked in columns %}
+          {% for key, label, ranked in columns %}
           <th{% if key == "season" %} aria-sort="descending"{% endif %}>
-            <button type="button">{{ key }}</button>
+            <button type="button">{{ label }}</button>
           </th>
           {% endfor %}
         </tr>
@@ -40,7 +40,7 @@
       <tbody>
         {% for row in rows %}
         <tr>
-          {% for key, ranked in columns %}
+          {% for key, label, ranked in columns %}
           {% set value = row[key] %}
           <td data-value="{{ '' if value is none else value }}">
             {%- if value is none -%}
