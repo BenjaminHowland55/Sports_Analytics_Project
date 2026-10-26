@@ -3,28 +3,36 @@
 {% block title %}Stats{% endblock %}
 
 {% block content %}
+  {# (column, has a league rank) #}
   {% set columns = [
-    ("season", "season"),
-    ("plays", "plays"),
-    ("epa_per_play_allowed", "epa_per_play_allowed"),
-    ("pressure_rate", "pressure_rate"),
-    ("blitz_rate", "blitz_rate"),
-    ("man_coverage_rate", "man_coverage_rate"),
+    ("season", false),
+    ("plays", false),
+    ("epa_per_play_allowed", true),
+    ("pass_epa_per_dropback_allowed", true),
+    ("rush_epa_per_carry_allowed", true),
+    ("explosive_play_rate_allowed", true),
+    ("pressure_rate", true),
+    ("four_man_pressure_rate", true),
+    ("clean_pocket_epa_allowed", true),
+    ("blitz_rate", false),
+    ("man_coverage_rate", false),
   ] %}
   <h1>Arizona Cardinals Defense by Season</h1>
   {% if rows %}
   <p class="table-note">
     Regular season, {{ rows[-1].season }}–{{ rows[0].season }}. Click a column name to sort it from high to low;
-    click again for low to high. Lower <code>epa_per_play_allowed</code> is better.
-    A dash (—) means the season wasn't charted: pressure and blitz rates start in 2016, man coverage in 2018.
+    click again for low to high. The small <span class="rank">#</span> after a number is Arizona's league rank that
+    season (#1 = best). Lower EPA and explosive-play numbers are better; higher pressure numbers are better.
+    A dash (—) means the season wasn't charted: pressure, clean-pocket, and blitz stats start in 2016, man coverage in 2018.
+    See <a href="{{ url_for('source') }}">Source</a> for what each column means.
   </p>
   <div class="table-wrap">
     <table class="sortable">
       <thead>
         <tr>
-          {% for key, label in columns %}
+          {% for key, ranked in columns %}
           <th{% if key == "season" %} aria-sort="descending"{% endif %}>
-            <button type="button">{{ label }}</button>
+            <button type="button">{{ key }}</button>
           </th>
           {% endfor %}
         </tr>
@@ -32,7 +40,7 @@
       <tbody>
         {% for row in rows %}
         <tr>
-          {% for key, label in columns %}
+          {% for key, ranked in columns %}
           {% set value = row[key] %}
           <td data-value="{{ '' if value is none else value }}">
             {%- if value is none -%}
@@ -42,6 +50,7 @@
             {%- else -%}
               {{ value }}
             {%- endif -%}
+            {%- if ranked and row[key ~ "_rank"] is not none %} <span class="rank">#{{ row[key ~ "_rank"] }}</span>{% endif -%}
             {%- if key == "season" and row.in_progress %} <span class="in-progress">(through week {{ row.last_week }})</span>{% endif -%}
           </td>
           {% endfor %}

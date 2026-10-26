@@ -14,7 +14,11 @@ body {
 
 main {
   padding: 2rem;
-  max-width: 1100px;
+}
+
+/* Keep text at a readable line length; tables can use the full width */
+main p, main dl, main ol, main ul, .placeholder {
+  max-width: 80ch;
 }
 
 /* Two-layer header: white top layer with the site name, red bottom layer with the buttons */
@@ -166,6 +170,16 @@ tr:hover td {
 .table-note {
   color: #cfcfcf;
   max-width: 70ch;
+}
+
+.rank {
+  color: #9a9a9a;
+  font-size: 0.8rem;
+  margin-left: 0.2rem;
+}
+
+.sortable td {
+  white-space: nowrap;
 }
 
 .in-progress {

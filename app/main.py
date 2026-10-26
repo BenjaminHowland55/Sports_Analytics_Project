@@ -20,8 +20,15 @@ REGULAR_SEASON_WEEKS = 18
 
 def get_arizona_history():
     query = text("""
-        SELECT season, plays, last_week, epa_per_play_allowed,
-               pressure_rate, blitz_rate, man_coverage_rate
+        SELECT season, plays, last_week,
+               epa_per_play_allowed, epa_per_play_allowed_rank,
+               pass_epa_per_dropback_allowed, pass_epa_per_dropback_allowed_rank,
+               rush_epa_per_carry_allowed, rush_epa_per_carry_allowed_rank,
+               explosive_play_rate_allowed, explosive_play_rate_allowed_rank,
+               pressure_rate, pressure_rate_rank,
+               four_man_pressure_rate, four_man_pressure_rate_rank,
+               clean_pocket_epa_allowed, clean_pocket_epa_allowed_rank,
+               blitz_rate, man_coverage_rate
         FROM team_defense_history
         WHERE team = 'ARI' AND season >= :first_season
         ORDER BY season DESC

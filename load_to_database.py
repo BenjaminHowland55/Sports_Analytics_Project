@@ -8,8 +8,10 @@ Creates (or replaces) two tables in the `nfl_analytics` database:
 
 A separate mode builds a long-running history table instead:
   team_defense_history  one row per defense per season, 2000 to the current season, with plays,
-                        last week played, EPA per play allowed, and (where charted) pressure rate
-                        and blitz rate (2016 on) and man coverage rate (2018 on)
+                        last week played, EPA per play / per dropback / per carry allowed, explosive
+                        play rate allowed, and (where charted) pressure, 4-or-fewer-rusher pressure,
+                        clean-pocket EPA and blitz rates (2016 on) and man coverage rate (2018 on).
+                        Each better-or-worse stat also gets a *_rank column (1 = best that season).
 
 Run from this folder:  python load_to_database.py           (plays + team_defense)
                        python load_to_database.py history   (team_defense_history, ~3-5 minutes)
@@ -28,6 +30,17 @@ from sqlalchemy.engine import URL
 SEASONS = [2023, 2024, 2025]
 HISTORY_FIRST_SEASON = 2000
 CHARTING_FIRST_SEASON = 2016
+
+# Stats ranked within each season (1 = best). True means a lower value is better.
+RANKED_STATS = {
+    "epa_per_play_allowed": True,
+    "pass_epa_per_dropback_allowed": True,
+    "rush_epa_per_carry_allowed": True,
+    "explosive_play_rate_allowed": True,
+    "pressure_rate": False,
+    "four_man_pressure_rate": False,
+    "clean_pocket_epa_allowed": True,
+}
 DB_USER = "2sjjjYZZAfxKqVv.root"
 DB_HOST = "gateway01.us-west-2.prod.aws.tidbcloud.com"
 DB_PORT = 4000
@@ -119,7 +132,7 @@ def build_history():
     plays = pd.concat([
         nfl.load_pbp(seasons=[season])
            .select(["game_id", "play_id", "season", "week", "season_type", "defteam",
-                    "play_type", "qb_dropback", "epa"])
+                    "play_type", "qb_dropback", "yards_gained", "epa"])
            .filter((pl.col("season_type") == "REG")
                    & pl.col("play_type").is_in(["pass", "run"])
                    & pl.col("epa").is_not_null())
@@ -147,14 +160,35 @@ def build_history():
     dropbacks["pressure"] = dropbacks["was_pressure"].astype(float)
     dropbacks["blitz"] = (rushers >= 5).astype(float).where(rushers.notna())
     dropbacks["man"] = dropbacks["defense_man_zone_type"].map({"MAN_COVERAGE": 1.0, "ZONE_COVERAGE": 0.0})
+    # Pressure created without blitzing, and EPA when the QB had a clean pocket
+    dropbacks["four_man_pressure"] = dropbacks["pressure"].where(rushers <= 4)
+    dropbacks["clean_epa"] = dropbacks["epa"].where(dropbacks["pressure"] == 0)
+
+    # Dropbacks (passes, sacks, scrambles) vs. designed runs; explosive = 20+ yards passing, 10+ rushing
+    is_dropback = plays["qb_dropback"] == 1
+    is_run = (plays["play_type"] == "run") & ~is_dropback
+    plays["pass_epa"] = plays["epa"].where(is_dropback)
+    plays["rush_epa"] = plays["epa"].where(is_run)
+    plays["explosive"] = ((is_dropback & (plays["yards_gained"] >= 20))
+                          | (is_run & (plays["yards_gained"] >= 10))).astype(float)
 
     overall = plays.groupby(["season", "defteam"]).agg(
-        plays=("epa", "size"), last_week=("week", "max"), epa_per_play_allowed=("epa", "mean"))
+        plays=("epa", "size"), last_week=("week", "max"), epa_per_play_allowed=("epa", "mean"),
+        pass_epa_per_dropback_allowed=("pass_epa", "mean"), rush_epa_per_carry_allowed=("rush_epa", "mean"),
+        explosive_play_rate_allowed=("explosive", "mean"))
     # Rates use charted dropbacks only; seasons with no charting stay blank
-    rates = (dropbacks.groupby(["season", "defteam"])[["pressure", "blitz", "man"]].mean()
-             .rename(columns={"pressure": "pressure_rate", "blitz": "blitz_rate", "man": "man_coverage_rate"}))
-    return (overall.join(rates).reset_index().rename(columns={"defteam": "team"})
-            .astype({"season": "int64", "plays": "int64", "last_week": "int64"}))
+    rates = (dropbacks.groupby(["season", "defteam"])
+             [["pressure", "four_man_pressure", "clean_epa", "blitz", "man"]].mean()
+             .rename(columns={"pressure": "pressure_rate", "four_man_pressure": "four_man_pressure_rate",
+                              "clean_epa": "clean_pocket_epa_allowed", "blitz": "blitz_rate",
+                              "man": "man_coverage_rate"}))
+    history = (overall.join(rates).reset_index().rename(columns={"defteam": "team"})
+               .astype({"season": "int64", "plays": "int64", "last_week": "int64"}))
+
+    for stat, lower_is_better in RANKED_STATS.items():
+        history[stat + "_rank"] = (history.groupby("season")[stat]
+                                   .rank(ascending=lower_is_better, method="min").astype("Int64"))
+    return history
 
 
 def upload(tables):
