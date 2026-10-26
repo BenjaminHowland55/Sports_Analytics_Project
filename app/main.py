@@ -1,4 +1,4 @@
-from flask import Flask, render_template
+from flask import Flask, redirect, render_template, url_for
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -27,15 +27,36 @@ def get_team_defense_rows():
 
 
 @app.route("/")
-def index():
+def home():
+    return render_template("home.html")
+
+
+@app.route("/stats")
+def stats():
     try:
         rows = get_team_defense_rows()
     except SQLAlchemyError:
         app.logger.exception("Could not load team_defense rows")
         rows = []
-    return render_template("index.html", rows=rows)
+    return render_template("stats.html", rows=rows)
 
 
+@app.route("/analysis")
+def analysis():
+    return render_template("analysis.html")
+
+
+@app.route("/visualizations")
+def visualizations():
+    return render_template("visualizations.html")
+
+
+@app.route("/source")
+def source():
+    return render_template("source.html")
+
+
+# The old About page became Home; send old links there instead of a 404.
 @app.route("/about")
 def about():
-    return render_template("about.html")
+    return redirect(url_for("home"), code=301)

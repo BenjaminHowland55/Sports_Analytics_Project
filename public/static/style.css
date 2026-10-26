@@ -1,9 +1,70 @@
+:root {
+  --cardinals-red: #97233f;
+  --cardinals-red-dark: #6e1a2e;
+  --white: #ffffff;
+}
+
 body {
   background-color: #000;
   color: #f2f2f2;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   line-height: 1.5;
-  margin: 2rem;
+  margin: 0;
+}
+
+main {
+  padding: 2rem;
+  max-width: 1100px;
+}
+
+/* Two-layer header: white top layer with the site name, red bottom layer with the buttons */
+.header-top {
+  background-color: var(--white);
+  padding: 1rem 2rem;
+}
+
+.site-title {
+  color: var(--cardinals-red);
+  font-size: 1.75rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.header-nav {
+  background-color: var(--cardinals-red);
+  display: flex;
+  flex-wrap: wrap;
+  padding: 0 1rem;
+  border-top: 4px solid var(--cardinals-red-dark);
+}
+
+.header-nav a {
+  color: var(--white);
+  font-weight: 600;
+  text-decoration: none;
+  padding: 0.85rem 1rem;
+  border-bottom: 4px solid transparent;
+}
+
+.header-nav a:hover {
+  background-color: var(--cardinals-red-dark);
+}
+
+.header-nav a.active {
+  border-bottom-color: var(--white);
+}
+
+/* Empty spots for content that hasn't been written yet */
+.placeholder {
+  border: 2px dashed #444;
+  border-radius: 8px;
+  padding: 2rem;
+  color: #9a9a9a;
+}
+
+/* Lets the table scroll sideways on narrow screens instead of breaking the page */
+.table-wrap {
+  overflow-x: auto;
 }
 
 table {

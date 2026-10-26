@@ -2,11 +2,30 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>{% block title %}Arizona Cardinals{% endblock %}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Home{% endblock %} | Arizona Cardinals</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-  <h1>Arizona Cardinals</h1>
-  {% block content %}{% endblock %}
+  {% set nav_items = [
+    ("home", "Home"),
+    ("stats", "Stats"),
+    ("analysis", "Analysis"),
+    ("visualizations", "Visualizations"),
+    ("source", "Source"),
+  ] %}
+  <header class="site-header">
+    <div class="header-top">
+      <a class="site-title" href="{{ url_for('home') }}">Arizona Cardinals</a>
+    </div>
+    <nav class="header-nav" aria-label="Main">
+      {% for endpoint, label in nav_items %}
+      <a href="{{ url_for(endpoint) }}"{% if request.endpoint == endpoint %} class="active" aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
 </body>
 </html>
