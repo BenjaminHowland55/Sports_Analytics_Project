@@ -58,6 +58,12 @@ main p, main dl, main ol, main ul, .placeholder {
   border-bottom-color: var(--white);
 }
 
+.subtitle {
+  color: #ff9bb3;
+  font-size: 1.25rem;
+  margin-top: -0.75rem;
+}
+
 /* Text pages (Source, and later Analysis) */
 main a {
   color: #ff9bb3;
