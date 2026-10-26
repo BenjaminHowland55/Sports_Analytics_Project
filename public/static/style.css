@@ -54,6 +54,41 @@ main {
   border-bottom-color: var(--white);
 }
 
+/* Text pages (Source, and later Analysis) */
+main a {
+  color: #ff9bb3;
+}
+
+main section {
+  margin-bottom: 2rem;
+}
+
+main h2 {
+  border-bottom: 2px solid var(--cardinals-red);
+  padding-bottom: 0.25rem;
+}
+
+dt {
+  font-weight: 700;
+  margin-top: 0.75rem;
+}
+
+dd {
+  margin: 0.25rem 0 0 1.25rem;
+  color: #cfcfcf;
+}
+
+code {
+  background-color: #1f1f1f;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.credit {
+  color: #9a9a9a;
+  font-size: 0.9rem;
+}
+
 /* Empty spots for content that hasn't been written yet */
 .placeholder {
   border: 2px dashed #444;

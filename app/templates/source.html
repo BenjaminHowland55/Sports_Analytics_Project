@@ -4,8 +4,70 @@
 
 {% block content %}
   <h1>Source</h1>
-  <section class="placeholder">
-    <!-- Describe where the data comes from here. -->
-    <p>Data source details coming soon.</p>
+
+  <section>
+    <h2>Where the data comes from</h2>
+    <p>
+      All data on this site comes from <a href="https://nflverse.nflverse.com/">nflverse</a>, a free,
+      open-source project that collects and publishes NFL data. We download it with
+      <a href="https://nflreadpy.nflverse.com/">nflreadpy</a>, the official nflverse package for Python.
+    </p>
   </section>
+
+  <section>
+    <h2>Datasets used</h2>
+    <dl>
+      <dt>Play-by-play (<code>load_pbp</code>)</dt>
+      <dd>
+        One row per play, including EPA (Expected Points Added). This is the source of every
+        defensive-efficiency number on the site.
+      </dd>
+      <dt>Participation (<code>load_participation</code>)</dt>
+      <dd>
+        Play-level charting: whether the quarterback was pressured, how many players rushed,
+        man or zone coverage, and which defenders were on the field.
+      </dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>How it gets to this site</h2>
+    <ol>
+      <li>The script <code>load_to_database.py</code> downloads the 2023, 2024, and 2025 seasons with nflreadpy.</li>
+      <li>It keeps regular-season run and pass plays only, leaving out playoffs, special teams, and plays wiped out by penalties.</li>
+      <li>It matches each play to its charting row and totals everything into one row per defense per season.</li>
+      <li>It uploads the result to our database. The Stats page reads from the <code>team_defense</code> table.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>What the Stats columns mean</h2>
+    <dl>
+      <dt><code>season</code>, <code>team</code></dt>
+      <dd>The regular season and the defense's team abbreviation.</dd>
+      <dt><code>plays</code></dt>
+      <dd>Run and pass plays the defense faced.</dd>
+      <dt><code>epa_per_play_allowed</code></dt>
+      <dd>Average EPA the defense allowed per play. Lower is better; 0 is about league average.</dd>
+      <dt><code>pressure_rate</code></dt>
+      <dd>Share of opponent dropbacks where the quarterback was pressured (hurried, hit, or sacked).</dd>
+      <dt><code>blitz_rate</code></dt>
+      <dd>Share of opponent dropbacks with 5 or more pass rushers.</dd>
+      <dt><code>man_coverage_rate</code></dt>
+      <dd>Share of charted pass plays where the defense played man coverage instead of zone.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Limits</h2>
+    <ul>
+      <li>Charting data such as pressure, blitzes, and coverage is complete from 2023 on. Earlier seasons are only partly charted, so the database starts in 2023.</li>
+      <li>The 2026 season isn't included yet. Its charting data hasn't been published by nflverse.</li>
+      <li>Pressure and coverage are recorded by people watching game film, so they involve some judgment.</li>
+    </ul>
+  </section>
+
+  <p class="credit">
+    Data: nflverse. See the <a href="https://github.com/nflverse">nflverse GitHub</a> for licensing and attribution details.
+  </p>
 {% endblock %}
