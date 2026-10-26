@@ -3,24 +3,54 @@
 {% block title %}Stats{% endblock %}
 
 {% block content %}
-  <h1>Stats</h1>
+  {% set columns = [
+    ("season", "season"),
+    ("plays", "plays"),
+    ("epa_per_play_allowed", "epa_per_play_allowed"),
+    ("pressure_rate", "pressure_rate"),
+    ("blitz_rate", "blitz_rate"),
+    ("man_coverage_rate", "man_coverage_rate"),
+  ] %}
+  <h1>Arizona Cardinals Defense by Season</h1>
   {% if rows %}
+  <p class="table-note">
+    Regular season, {{ rows[-1].season }}–{{ rows[0].season }}. Click a column name to sort it from high to low;
+    click again for low to high. Lower <code>epa_per_play_allowed</code> is better.
+    A dash (—) means the season wasn't charted: pressure and blitz rates start in 2016, man coverage in 2018.
+  </p>
   <div class="table-wrap">
-    <table>
-      <tr>
-        {% for column in rows[0].keys() %}
-        <th>{{ column }}</th>
+    <table class="sortable">
+      <thead>
+        <tr>
+          {% for key, label in columns %}
+          <th{% if key == "season" %} aria-sort="descending"{% endif %}>
+            <button type="button">{{ label }}</button>
+          </th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          {% for key, label in columns %}
+          {% set value = row[key] %}
+          <td data-value="{{ '' if value is none else value }}">
+            {%- if value is none -%}
+              —
+            {%- elif value is float -%}
+              {{ "%.3f"|format(value) }}
+            {%- else -%}
+              {{ value }}
+            {%- endif -%}
+            {%- if key == "season" and row.in_progress %} <span class="in-progress">(through week {{ row.last_week }})</span>{% endif -%}
+          </td>
+          {% endfor %}
+        </tr>
         {% endfor %}
-      </tr>
-      {% for row in rows %}
-      <tr>
-        {% for value in row.values() %}
-        <td>{{ value|round(3) if value is float else value }}</td>
-        {% endfor %}
-      </tr>
-      {% endfor %}
+      </tbody>
     </table>
   </div>
+  <script src="{{ url_for('static', filename='sort-table.js') }}" defer></script>
   {% else %}
   <p>No data available right now.</p>
   {% endif %}

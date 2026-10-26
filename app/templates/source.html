@@ -33,10 +33,10 @@
   <section>
     <h2>How it gets to this site</h2>
     <ol>
-      <li>The script <code>load_to_database.py</code> downloads the 2023, 2024, and 2025 seasons with nflreadpy.</li>
+      <li>The script <code>load_to_database.py history</code> downloads every season from 2000 to the current one with nflreadpy.</li>
       <li>It keeps regular-season run and pass plays only, leaving out playoffs, special teams, and plays wiped out by penalties.</li>
-      <li>It matches each play to its charting row and totals everything into one row per defense per season.</li>
-      <li>It uploads the result to our database. The Stats page reads from the <code>team_defense</code> table.</li>
+      <li>It matches each play to its charting row (2016 on) and totals everything into one row per defense per season.</li>
+      <li>It uploads the result to our database. The Stats page reads Arizona's rows from the <code>team_defense_history</code> table.</li>
     </ol>
   </section>
 
@@ -61,8 +61,9 @@
   <section>
     <h2>Limits</h2>
     <ul>
-      <li>Charting data such as pressure, blitzes, and coverage is complete from 2023 on. Earlier seasons are only partly charted, so the database starts in 2023.</li>
-      <li>The 2026 season isn't included yet. Its charting data hasn't been published by nflverse.</li>
+      <li>Pressure and blitz rates start in 2016, and man coverage starts in 2018. About 90% of pass plays are charted from 2016 to 2022, and all of them from 2023 on. Rates use charted plays only.</li>
+      <li>How plays were charted changed over the years (for example, league-wide pressure rates jump between 2017 and 2018), so compare rates across eras with care.</li>
+      <li>The current season only has efficiency numbers so far. Its charting data hasn't been published by nflverse yet.</li>
       <li>Pressure and coverage are recorded by people watching game film, so they involve some judgment.</li>
     </ul>
   </section>

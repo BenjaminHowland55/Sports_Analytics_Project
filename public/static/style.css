@@ -123,3 +123,52 @@ tr:nth-child(even) td {
 tr:hover td {
   background-color: #2a2a2a;
 }
+
+/* Sortable table headers: the arrow shows the current sort direction */
+.sortable th {
+  padding: 0;
+}
+
+.sortable th button {
+  all: unset;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.5rem 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sortable th button:hover {
+  background-color: #2a2a2a;
+}
+
+.sortable th button:focus-visible {
+  outline: 2px solid var(--white);
+  outline-offset: -2px;
+}
+
+.sortable th button::after {
+  content: " ↕";
+  color: #666;
+}
+
+.sortable th[aria-sort="descending"] button::after {
+  content: " ▼";
+  color: #ff9bb3;
+}
+
+.sortable th[aria-sort="ascending"] button::after {
+  content: " ▲";
+  color: #ff9bb3;
+}
+
+.table-note {
+  color: #cfcfcf;
+  max-width: 70ch;
+}
+
+.in-progress {
+  color: #9a9a9a;
+  font-size: 0.85rem;
+}

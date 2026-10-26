@@ -6,17 +6,28 @@ Creates (or replaces) two tables in the `nfl_analytics` database:
   team_defense  one row per defense per season: the notebook's table (data/team_defense_2023_2025.csv)
                 plus blitz, man-coverage and package rates
 
-Run from this folder:  python load_to_database.py
+A separate mode builds a long-running history table instead:
+  team_defense_history  one row per defense per season, 2000 to the current season, with plays,
+                        last week played, EPA per play allowed, and (where charted) pressure rate
+                        and blitz rate (2016 on) and man coverage rate (2018 on)
+
+Run from this folder:  python load_to_database.py           (plays + team_defense)
+                       python load_to_database.py history   (team_defense_history, ~3-5 minutes)
 The password is read from .env (key: DATABASE_PASSWORD) and is never printed.
 """
+import sys
+
 import certifi
 import nflreadpy as nfl
 import pandas as pd
+import polars as pl
 from dotenv import dotenv_values
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 
 SEASONS = [2023, 2024, 2025]
+HISTORY_FIRST_SEASON = 2000
+CHARTING_FIRST_SEASON = 2016
 DB_USER = "2sjjjYZZAfxKqVv.root"
 DB_HOST = "gateway01.us-west-2.prod.aws.tidbcloud.com"
 DB_PORT = 4000
@@ -99,23 +110,76 @@ def build_tables():
     return plays, team_defense
 
 
-def main():
-    plays, team_defense = build_tables()
+def build_history():
+    current_season = nfl.get_current_season()
+    print(f"Downloading play-by-play {HISTORY_FIRST_SEASON}-{current_season} from nflverse...")
 
+    # One season at a time, keeping only the needed columns, so 25+ seasons fit in memory.
+    # Older seasons store play_id as a decimal, so cast it to match the participation table.
+    plays = pd.concat([
+        nfl.load_pbp(seasons=[season])
+           .select(["game_id", "play_id", "season", "week", "season_type", "defteam",
+                    "play_type", "qb_dropback", "epa"])
+           .filter((pl.col("season_type") == "REG")
+                   & pl.col("play_type").is_in(["pass", "run"])
+                   & pl.col("epa").is_not_null())
+           .with_columns(pl.col("play_id").cast(pl.Int64))
+           .to_pandas()
+        for season in range(HISTORY_FIRST_SEASON, current_season + 1)
+    ], ignore_index=True)
+
+    # Charting starts in 2016; nflverse publishes it only for completed seasons
+    charting = []
+    for season in range(CHARTING_FIRST_SEASON, current_season + 1):
+        try:
+            charting.append(nfl.load_participation(seasons=[season])
+                            .select(["nflverse_game_id", "play_id", "was_pressure",
+                                     "number_of_pass_rushers", "defense_man_zone_type"])
+                            .with_columns(pl.col("play_id").cast(pl.Int64))
+                            .to_pandas())
+        except ValueError:
+            print(f"  No charting data for {season} yet")
+    participation = pd.concat(charting, ignore_index=True)
+
+    dropbacks = plays[plays["qb_dropback"] == 1].merge(
+        participation, left_on=["game_id", "play_id"], right_on=["nflverse_game_id", "play_id"], how="left")
+    rushers = dropbacks["number_of_pass_rushers"].where(dropbacks["number_of_pass_rushers"].between(1, 11))
+    dropbacks["pressure"] = dropbacks["was_pressure"].astype(float)
+    dropbacks["blitz"] = (rushers >= 5).astype(float).where(rushers.notna())
+    dropbacks["man"] = dropbacks["defense_man_zone_type"].map({"MAN_COVERAGE": 1.0, "ZONE_COVERAGE": 0.0})
+
+    overall = plays.groupby(["season", "defteam"]).agg(
+        plays=("epa", "size"), last_week=("week", "max"), epa_per_play_allowed=("epa", "mean"))
+    # Rates use charted dropbacks only; seasons with no charting stay blank
+    rates = (dropbacks.groupby(["season", "defteam"])[["pressure", "blitz", "man"]].mean()
+             .rename(columns={"pressure": "pressure_rate", "blitz": "blitz_rate", "man": "man_coverage_rate"}))
+    return (overall.join(rates).reset_index().rename(columns={"defteam": "team"})
+            .astype({"season": "int64", "plays": "int64", "last_week": "int64"}))
+
+
+def upload(tables):
     with connect("sys").begin() as conn:
         conn.execute(text(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}"))
 
     engine = connect(DB_NAME)
-    for name, df in [("team_defense", team_defense), ("plays", plays)]:
+    for name, df in tables:
         print(f"Uploading {name}: {len(df):,} rows...")
         df.to_sql(name, engine, if_exists="replace", index=False, chunksize=5000, method="multi")
 
     # Confirm every row arrived
     with engine.connect() as conn:
-        for name, df in [("team_defense", team_defense), ("plays", plays)]:
+        for name, df in tables:
             in_db = conn.execute(text(f"SELECT COUNT(*) FROM {name}")).scalar()
             status = "OK" if in_db == len(df) else "MISMATCH"
             print(f"[{status}] {name}: {in_db:,} rows in database (expected {len(df):,})")
+
+
+def main():
+    if sys.argv[1:] == ["history"]:
+        upload([("team_defense_history", build_history())])
+    else:
+        plays, team_defense = build_tables()
+        upload([("team_defense", team_defense), ("plays", plays)])
 
 
 if __name__ == "__main__":

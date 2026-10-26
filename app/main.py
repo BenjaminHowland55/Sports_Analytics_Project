@@ -14,16 +14,24 @@ except ImportError:
 app = Flask(__name__, static_folder="../public/static", static_url_path="/static")
 
 
-def get_team_defense_rows():
+FIRST_SEASON = 2000
+REGULAR_SEASON_WEEKS = 18
+
+
+def get_arizona_history():
     query = text("""
-        SELECT season, team, plays, epa_per_play_allowed,
+        SELECT season, plays, last_week, epa_per_play_allowed,
                pressure_rate, blitz_rate, man_coverage_rate
-        FROM team_defense
-        ORDER BY season, team
-        LIMIT 10
+        FROM team_defense_history
+        WHERE team = 'ARI' AND season >= :first_season
+        ORDER BY season DESC
     """)
     with engine.connect() as conn:
-        return [dict(row._mapping) for row in conn.execute(query)]
+        rows = [dict(row._mapping) for row in conn.execute(query, {"first_season": FIRST_SEASON})]
+    # The newest season is still being played if it hasn't reached the last regular-season week
+    if rows:
+        rows[0]["in_progress"] = rows[0]["last_week"] < REGULAR_SEASON_WEEKS
+    return rows
 
 
 @app.route("/")
@@ -34,9 +42,9 @@ def home():
 @app.route("/stats")
 def stats():
     try:
-        rows = get_team_defense_rows()
+        rows = get_arizona_history()
     except SQLAlchemyError:
-        app.logger.exception("Could not load team_defense rows")
+        app.logger.exception("Could not load team_defense_history rows")
         rows = []
     return render_template("stats.html", rows=rows)
 
