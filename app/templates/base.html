@@ -21,11 +21,12 @@
   ] %}
   <header class="site-header">
     <div class="header-top">
-      <div class="container">
+      <div class="container header-top-inner">
         <a class="site-title" href="{{ url_for('home') }}">
           <img src="{{ url_for('static', filename='favicon.svg') }}" alt="" width="28" height="28">
           Rebuilding the Red Wall
         </a>
+        <img class="team-logo" src="{{ url_for('static', filename='img/ari-logo.png') }}" alt="Arizona Cardinals logo" width="56" height="56">
       </div>
     </div>
     <nav class="header-nav" aria-label="Main">
@@ -46,6 +47,7 @@
       <span>Data: <a href="https://nflverse.nflverse.com/">nflverse</a> via nflreadpy</span>
       {% if data_through %}<span>Data through {{ data_through.season }} Week {{ data_through.week }}</span>{% endif %}
       <span><a href="{{ github_url }}">Project on GitHub</a></span>
+      <span>Student project. Not affiliated with the Arizona Cardinals or the NFL; team logo is a trademark of its owner.</span>
     </div>
   </footer>
 </body>
