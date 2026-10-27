@@ -13,23 +13,51 @@ A separate mode builds a long-running history table instead:
                         clean-pocket EPA and blitz rates (2016 on) and man coverage rate (2018 on).
                         Each better-or-worse stat also gets a *_rank column (1 = best that season).
 
+A third mode builds the player tables (every team, so Arizona's players can be compared with the league):
+  player_defense_season  one row per defender per season, 2018 to the current season: Pro Football
+                         Reference's charted stats (pressures, sacks, targets and yards allowed in
+                         coverage, missed tackles) plus regular-season defensive snaps
+  player_impact          one row per defender per season, 2016-2025 (seasons with participation data):
+                         the defense's EPA allowed with the player on the field, and an adjusted
+                         plus-minus that credits each play's EPA to the 11 defenders on the field
+                         while accounting for teammates and the offense faced (ridge regression).
+                         Positive impact = fewer EPA allowed. Very noisy: it barely repeats from one
+                         season to the next, so treat it as a clue, not a verdict.
+
 Run from this folder:  python load_to_database.py           (plays + team_defense)
                        python load_to_database.py history   (team_defense_history, ~3-5 minutes)
+                       python load_to_database.py players   (player tables, ~5-10 minutes)
 The password is read from .env (key: DATABASE_PASSWORD) and is never printed.
 """
 import sys
 
 import certifi
 import nflreadpy as nfl
+import numpy as np
 import pandas as pd
 import polars as pl
 from dotenv import dotenv_values
+from scipy import sparse
+from sklearn.linear_model import Ridge
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 
 SEASONS = [2023, 2024, 2025]
 HISTORY_FIRST_SEASON = 2000
 CHARTING_FIRST_SEASON = 2016
+PFR_FIRST_SEASON = 2018
+# How strongly the plus-minus pulls players toward average; chosen by 5-fold cross-validation on 2025
+IMPACT_SHRINKAGE = 1000
+
+# Pro Football Reference column -> readable name
+PFR_COLUMNS = {
+    "season": "season", "player": "player", "pfr_id": "pfr_id", "tm": "team", "pos": "position",
+    "age": "age", "g": "games", "gs": "games_started",
+    "prss": "pressures", "hrry": "hurries", "qbkd": "qb_knockdowns", "sk": "sacks", "bltz": "blitzes",
+    "tgt": "targets", "cmp": "completions_allowed", "yds": "yards_allowed", "td": "tds_allowed",
+    "int": "interceptions", "rat": "passer_rating_allowed", "yds_tgt": "yards_per_target",
+    "comb": "tackles", "m_tkl": "missed_tackles", "m_tkl_percent": "missed_tackle_rate",
+}
 
 # Stats ranked within each season (1 = best). True means a lower value is better.
 RANKED_STATS = {
@@ -191,6 +219,94 @@ def build_history():
     return history
 
 
+def build_player_season():
+    current_season = nfl.get_current_season()
+    seasons = list(range(PFR_FIRST_SEASON, current_season + 1))
+    print(f"Downloading player stats {PFR_FIRST_SEASON}-{current_season} from nflverse...")
+    stats = (nfl.load_pfr_advstats(seasons=seasons, stat_type="def", summary_level="season")
+             .to_pandas()[list(PFR_COLUMNS)].rename(columns=PFR_COLUMNS))
+
+    # Regular-season defensive snaps; a traded player ("2TM") is listed under the last team played for
+    snaps = (nfl.load_snap_counts(seasons=seasons).filter(pl.col("game_type") == "REG").to_pandas()
+             .sort_values(["season", "week"]))
+    per_player = snaps.groupby(["season", "pfr_player_id"]).agg(
+        defense_snaps=("defense_snaps", "sum"), last_team=("team", "last")).reset_index()
+    stats = stats.merge(per_player, left_on=["season", "pfr_id"], right_on=["season", "pfr_player_id"], how="left")
+    stats["team"] = stats["team"].where(~stats["team"].str.endswith("TM"), stats["last_team"])
+
+    # gsis_id links a player to the play-by-play and participation data
+    ids = nfl.load_players().select(["pfr_id", "gsis_id"]).drop_nulls().unique("pfr_id").to_pandas()
+    stats = stats.merge(ids, on="pfr_id", how="left").drop(columns=["pfr_player_id", "last_team"])
+
+    # A few players have stats but no recorded defensive snaps; their per-snap rates stay blank
+    snaps_played = stats["defense_snaps"].where(stats["defense_snaps"] > 0)
+    stats["pressures_per_100_snaps"] = 100 * stats["pressures"] / snaps_played
+    stats["targets_per_100_snaps"] = 100 * stats["targets"] / snaps_played
+    return stats.astype({"season": "int64", "defense_snaps": "Int64"})
+
+
+def build_player_impact():
+    current_season = nfl.get_current_season()
+    names = nfl.load_players().select(["gsis_id", "display_name", "position"]).to_pandas()
+    seasons = []
+    for season in range(CHARTING_FIRST_SEASON, current_season + 1):
+        try:
+            on_field = (nfl.load_participation(seasons=[season])
+                        .select(["nflverse_game_id", "play_id", "defense_players", "n_defense"])
+                        .with_columns(pl.col("play_id").cast(pl.Int64)).to_pandas())
+        except ValueError:
+            print(f"  No participation data for {season} yet")
+            continue
+        print(f"  Fitting player impact for {season}...")
+        plays = (nfl.load_pbp(seasons=[season])
+                 .select(["game_id", "play_id", "season_type", "posteam", "defteam", "play_type", "qb_dropback", "epa"])
+                 .filter((pl.col("season_type") == "REG")
+                         & pl.col("play_type").is_in(["pass", "run"])
+                         & pl.col("epa").is_not_null())
+                 .with_columns(pl.col("play_id").cast(pl.Int64))
+                 .to_pandas())
+        plays = plays.merge(on_field, left_on=["game_id", "play_id"], right_on=["nflverse_game_id", "play_id"])
+        # Keep plays with a believable defender count (a few have 10 or 12 from charting errors or penalties)
+        plays = plays[plays["n_defense"].between(10, 12)].reset_index(drop=True)
+        plays["is_pass"] = plays["qb_dropback"] == 1
+
+        # One row per defender per play
+        player_plays = (plays[["defense_players", "defteam", "is_pass", "epa"]]
+                        .assign(gsis_id=lambda d: d["defense_players"].str.split(";"))
+                        .explode("gsis_id").drop(columns="defense_players"))
+        player_plays = player_plays[player_plays["gsis_id"].str.len() > 0]
+
+        # Plain on-field numbers: plays, main team, EPA allowed on dropbacks and on runs
+        summary = player_plays.groupby("gsis_id").agg(
+            team=("defteam", lambda t: t.mode().iloc[0]), plays=("epa", "size"), pass_plays=("is_pass", "sum"))
+        summary["on_field_epa_per_dropback"] = player_plays[player_plays["is_pass"]].groupby("gsis_id")["epa"].mean()
+        summary["on_field_epa_per_carry"] = player_plays[~player_plays["is_pass"]].groupby("gsis_id")["epa"].mean()
+
+        # Adjusted plus-minus: EPA ~ the defenders on the field + the offense faced, fit separately for
+        # pass and run plays. The shrinkage keeps players with few snaps near zero.
+        players = pd.Index(summary.index)
+        offenses = pd.Index(plays["posteam"].unique())
+        rows = player_plays.index.to_numpy()
+        on_field_matrix = sparse.csr_matrix(
+            (np.ones(len(rows)), (rows, players.get_indexer(player_plays["gsis_id"]))),
+            shape=(len(plays), len(players)))
+        offense_matrix = sparse.csr_matrix(
+            (np.ones(len(plays)), (np.arange(len(plays)), offenses.get_indexer(plays["posteam"]))),
+            shape=(len(plays), len(offenses)))
+        X = sparse.hstack([on_field_matrix, offense_matrix]).tocsr()
+        for name, mask in [("pass_impact", plays["is_pass"]), ("run_impact", ~plays["is_pass"])]:
+            model = Ridge(alpha=IMPACT_SHRINKAGE).fit(X[mask.to_numpy()], plays.loc[mask, "epa"].to_numpy())
+            # Flip the sign so a positive number means the defense allowed less EPA per play
+            summary[name] = -model.coef_[:len(players)]
+        summary["season"] = season
+        seasons.append(summary.reset_index())
+
+    impact = pd.concat(seasons, ignore_index=True).merge(names, on="gsis_id", how="left")
+    impact = impact.rename(columns={"display_name": "player"})
+    return impact[["season", "gsis_id", "player", "position", "team", "plays", "pass_plays",
+                   "on_field_epa_per_dropback", "on_field_epa_per_carry", "pass_impact", "run_impact"]]
+
+
 def upload(tables):
     with connect("sys").begin() as conn:
         conn.execute(text(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}"))
@@ -211,6 +327,8 @@ def upload(tables):
 def main():
     if sys.argv[1:] == ["history"]:
         upload([("team_defense_history", build_history())])
+    elif sys.argv[1:] == ["players"]:
+        upload([("player_defense_season", build_player_season()), ("player_impact", build_player_impact())])
     else:
         plays, team_defense = build_tables()
         upload([("team_defense", team_defense), ("plays", plays)])
