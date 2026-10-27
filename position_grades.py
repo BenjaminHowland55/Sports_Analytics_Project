@@ -1,0 +1,624 @@
+"""Grade every team's five defensive position rooms for the current season, and compare what each room costs.
+
+Rooms follow Over The Cap's contract positions: ED (edge), IDL (interior line), LB, CB, S.
+
+How a player is graded (every number is recomputed on each run):
+  1. Opportunities, game by game:  pass snaps = defensive snaps x the team's dropback share that game,
+     run snaps = defensive snaps - pass snaps, coverage snaps = pass snaps - blitzes.
+  2. Each stat is events / opportunities (e.g. pressures / pass snaps). A stat is used for a room only if
+     it measures that room's job and repeats from one season to the next (year-to-year r >= MIN_RELIABILITY).
+  3. Blended rate over the last three seasons, weighted 3-2-1 (most recent first), pulled toward the
+     league rate:   (sum w*events + k*league rate) / (sum w*opportunities + k),   k = n * (1 - r) / r
+     where r is the stat's year-to-year correlation at an average sample of n opportunities.
+  4. z = (blended rate - room average) / room standard deviation (average and spread from the players with
+     the most opportunities); the sign is flipped for lower-is-better stats so a positive z is always good,
+     and z is capped at +/- Z_CAP so one stat can't dominate.
+  5. Weight = what the NFL pays for. For every veteran contract signed since 2019 (rookie deals left out),
+     the player's z-scores from the three seasons before signing are compared with the contract's yearly value
+     as a share of the cap, holding age fixed (regression, weights kept non-negative). Snap share is one of the
+     stats, so playing time counts. A stat's weight is the extra share of the cap paid for being one standard
+     deviation better at it. Snap share is capped in some rooms, and lockdown coverage gets
+     CORNER_LOCKDOWN_SHARE of the corner grade (see set_weights).
+  6. Composite = sum(weight * z) / sum(weight).
+  7. Player grade (0-100) = percentile of the composite among this season's regulars in the same room.
+  (Each stat's impact in expected points is still measured and stored for comparison with the market.)
+
+How a room is graded:
+  room score  = this season's snap-weighted average composite (players with no history count as average)
+  room spend  = sum of the players' contract APY as a share of the salary cap in the year signed
+  value       = room score - the score expected for that spend (straight-line fit across the 32 teams)
+
+Creates (or replaces) three tables in nfl_analytics: player_grades, room_grades, grade_stats.
+Run from this folder:  python position_grades.py   (~5-10 minutes)
+"""
+import nflreadpy as nfl
+import numpy as np
+import pandas as pd
+import polars as pl
+from scipy.optimize import nnls
+
+from load_to_database import upload
+
+FIRST_SEASON = 2018  # Pro Football Reference's charted stats start here
+WINDOW_WEIGHTS = [3, 2, 1]  # current season, last season, the season before
+MIN_RELIABILITY = 0.15
+REGULAR_SNAPS = 100  # this season's snaps needed to be in the 0-100 player grade comparison
+# Players under REGULAR_SNAPS this season (hurt, or not yet back) stay listed if they have this many snaps over
+# the three-season window and are on a roster, so an injury doesn't drop a proven player from the rankings
+LIMITED_MIN_WINDOW_SNAPS = 800
+MARKET_MIN_SNAPS = 300  # snaps over the three seasons before signing for a contract to count in the market study
+# z-scores are capped at +/- this many standard deviations, so one stat can't dominate a grade. Noisy stats are
+# pulled close together, so dividing by their small spread can turn a few lucky plays (six forced fumbles)
+# into a +3.5 outlier; the cap left every room's match with veteran pay the same or better.
+Z_CAP = 2.0
+MARKET_BOOTSTRAPS = 200
+# Stats kept although they repeat less than MIN_RELIABILITY, because two separate checks back them: veteran
+# contracts pay for them, and adding them made the room's grades match team results better in the 2020-2025
+# backtest. Linebacker completion % allowed: market weight 25% (90% range 13-33%); LB grade vs. EPA on throws to
+# tight ends and running backs r = 0.19 -> 0.22. Their large k keeps small samples close to average.
+# Forced fumbles (worth about 3 expected points; the offense loses the ball 55% of the time): market weight
+# 6-29% depending on the room, with every bootstrap range above zero; adding them improved the edge, interior
+# and safety backtests and moved the corner one within noise. Linebackers pass the repeat test on their own.
+KEPT_DESPITE_LOW_REPEAT = {("LB", "completion_rate"), ("ED", "forced_fumble_rate"), ("IDL", "forced_fumble_rate"),
+                           ("CB", "forced_fumble_rate"), ("S", "forced_fumble_rate")}
+# Corners: interceptions swing a lot from season to season, so rather than follow pay alone, lockdown coverage
+# (not allowing yards or completions) gets this share of the corner grade. The market alone gives it about 31%.
+# Within the lockdown stats, and within the rest, stats keep the market's proportions.
+CORNER_LOCKDOWN_STATS = ["yards_per_coverage_snap", "completion_rate"]
+CORNER_LOCKDOWN_SHARE = 0.50
+# Snap share (how much of the defense's snaps a player is trusted to play in the games he dressed for) is what coaches
+# who watch every snap think, and a big part of pay. Uncapped, it put the best-paid players at the top in every
+# room (rank match with veteran pay: edge 0.56 -> 0.84, corners 0.23 -> 0.66, linebackers 0.17 -> 0.68) and
+# improved the edge and corner backtests, but it crowded out the stats that separate linebackers and safeties on
+# the field. So its weight is capped where the 2020-2025 backtest started to drop (None = no cap).
+SNAP_SHARE_CAP = {"ED": None, "IDL": 0.30, "LB": 0.20, "CB": None, "S": 0.20}
+ROOMS = ["ED", "IDL", "LB", "CB", "S"]
+ROOM_NAMES = {"ED": "Edge Rushers", "IDL": "Interior Line", "LB": "Linebackers", "CB": "Cornerbacks", "S": "Safeties"}
+
+# Each stat: (events column, opportunities column, minimum opportunities for the reliability test,
+#             lower is better, the event whose expected-points value sets its impact)
+STATS = {
+    "stop_rate": ("stops", "expected_stops", 8, False, "stop"),
+    "sack_rate": ("sacks", "pass_snaps", 150, False, "sack"),
+    "non_sack_pressure_rate": ("non_sack_pressures", "pass_snaps", 150, False, "non_sack_pressure"),
+    "pressure_per_blitz": ("pressures", "blitzes", 20, False, "pressure"),
+    "tfl_rate": ("tackles_for_loss", "run_snaps", 100, False, "tackle_for_loss"),
+    "missed_tackle_rate": ("missed_tackles", "tackle_attempts", 20, True, "missed_tackle"),
+    "yards_per_coverage_snap": ("yards_allowed", "coverage_snaps", 150, True, "coverage_yard"),
+    "completion_rate": ("completions_allowed", "targets", 25, True, "completion"),
+    "interception_rate": ("interceptions", "targets", 25, False, "interception"),
+    "breakup_rate": ("breakups", "targets", 25, False, "breakup"),
+    "forced_fumble_rate": ("forced_fumbles", "defense_snaps", 300, False, "forced_fumble"),
+    "snap_share": ("defense_snaps", "team_defense_snaps", 100, False, "snap"),
+}
+# Stats that describe each room's job. Sacks and other pressures are separate so a sack isn't counted twice,
+# and stops leave out tackles for loss for the same reason. Pressure rate is left out for LB/CB/S because it
+# mostly reflects how often they are sent on blitzes (a coaching choice), not skill; pressures per blitz
+# covers that instead. How much each stat counts comes from what NFL contracts pay for (market_weights).
+ROOM_STATS = {
+    "ED": ["snap_share", "sack_rate", "non_sack_pressure_rate", "tfl_rate", "stop_rate", "forced_fumble_rate",
+           "missed_tackle_rate"],
+    "IDL": ["snap_share", "sack_rate", "non_sack_pressure_rate", "tfl_rate", "stop_rate", "forced_fumble_rate",
+            "missed_tackle_rate"],
+    "LB": ["snap_share", "stop_rate", "pressure_per_blitz", "tfl_rate", "forced_fumble_rate", "missed_tackle_rate",
+           "yards_per_coverage_snap", "completion_rate", "interception_rate", "breakup_rate"],
+    "CB": ["snap_share", "yards_per_coverage_snap", "completion_rate", "interception_rate", "breakup_rate",
+           "forced_fumble_rate", "stop_rate", "missed_tackle_rate"],
+    "S": ["snap_share", "yards_per_coverage_snap", "completion_rate", "interception_rate", "breakup_rate",
+          "forced_fumble_rate", "stop_rate", "tfl_rate", "missed_tackle_rate"],
+}
+# Play-by-play tackle credits: a solo tackle or a tackle with assistance counts 1, an assist counts 0.5
+FULL_TACKLE_COLUMNS = ["solo_tackle_1_player_id", "solo_tackle_2_player_id",
+                       "tackle_with_assist_1_player_id", "tackle_with_assist_2_player_id"]
+ASSIST_COLUMNS = ["assist_tackle_1_player_id", "assist_tackle_2_player_id",
+                  "assist_tackle_3_player_id", "assist_tackle_4_player_id"]
+# Backtest 2020-2025: each room graded from earlier seasons only, using that season's roster, then compared
+# with the team's result that season (average correlation across the six seasons)
+CONFIDENCE = {
+    "ED": ("Moderate", "Matched overall EPA allowed (r = 0.23) and team sack rate (r = 0.19)"),
+    "IDL": ("Moderate", "Matched team sack rate (r = 0.24)"),
+    "LB": ("Fair", "Matched overall EPA allowed (r = 0.18) and throws to tight ends and running backs (r = 0.15)"),
+    "CB": ("Moderate", "Matched overall EPA allowed (r = 0.22) and outside throws (r = 0.17)"),
+    "S": ("Low", "Matched overall EPA allowed (r = 0.16) and run defense (r = 0.14) only weakly"),
+}
+# This season's team result in each room's main area, and whether a higher number is better
+ROOM_AREA = {
+    "ED": ("sack_rate", "Sacks per dropback", True),
+    "IDL": ("run_epa", "EPA per designed run allowed", False),
+    "LB": ("te_rb_epa", "EPA per target to TEs and RBs", False),
+    "CB": ("wr_outside_epa", "EPA per outside target to WRs", False),
+    "S": ("deep_epa", "EPA per deep target (15+ air yards)", False),
+}
+# Roster positions -> room, for the few players with no contract on file
+POSITION_TO_ROOM = {"DE": "ED", "OLB": "ED", "DT": "IDL", "NT": "IDL", "DL": "IDL", "LB": "LB", "ILB": "LB",
+                    "MLB": "LB", "CB": "CB", "DB": "CB", "S": "S", "FS": "S", "SS": "S", "SAF": "S"}
+
+
+def load_plays(seasons):
+    """Regular-season run/pass plays, keeping only the columns needed here."""
+    return pd.concat([
+        nfl.load_pbp(seasons=[season])
+           .select(["game_id", "play_id", "season", "season_type", "defteam", "play_type", "qb_dropback",
+                    "pass_attempt", "sack", "interception", "complete_pass", "incomplete_pass", "yards_gained",
+                    "pass_location", "air_yards", "receiver_player_id", "epa", "success", "fumble_forced"]
+                   + FULL_TACKLE_COLUMNS + ASSIST_COLUMNS)
+           .filter((pl.col("season_type") == "REG") & pl.col("play_type").is_in(["pass", "run"]))
+           .with_columns(pl.col("play_id").cast(pl.Int64))
+           .to_pandas()
+        for season in seasons
+    ], ignore_index=True)
+
+
+def tackled_plays(plays):
+    """Plays that ended in a tackle (not sacks), and whether each was a stop: the offense lost expected points
+    (EPA <= 0) without losing yards. Tackles for loss are their own stat, so they aren't stops."""
+    tackled = plays[plays[FULL_TACKLE_COLUMNS + ASSIST_COLUMNS].notna().any(axis=1)
+                    & (plays["sack"] == 0) & plays["epa"].notna()].copy()
+    tackled["stop"] = (tackled["success"] == 0) & (tackled["yards_gained"] >= 0)
+    return tackled
+
+
+def stops_by_game(plays):
+    """Each player's stops in each game on run plays and on pass plays, with tackle credit (1 for a tackle,
+    0.5 for an assist)."""
+    tackled = tackled_plays(plays)
+    credits = pd.concat([
+        tackled.loc[tackled[column].notna(), ["game_id", column, "stop", "qb_dropback"]]
+               .rename(columns={column: "gsis_id"}).assign(credit=1.0 if column in FULL_TACKLE_COLUMNS else 0.5)
+        for column in FULL_TACKLE_COLUMNS + ASSIST_COLUMNS
+    ], ignore_index=True)
+    credits["stops"] = credits["credit"] * credits["stop"]
+    credits["kind"] = np.where(credits["qb_dropback"] == 1, "pass_stops", "run_stops")
+    return (credits.pivot_table(index=["game_id", "gsis_id"], columns="kind", values="stops", aggfunc="sum",
+                                fill_value=0).reset_index().rename_axis(columns=None))
+
+
+def measure_event_values(plays, seasons):
+    """Expected points each defensive event is worth, from every completed season's plays.
+
+    Each value is the swing against what usually happens instead, e.g. a sack against a clean-pocket dropback,
+    an interception against an average target. A missed tackle has no play-by-play flag, so its cost comes from
+    a team-game regression: EPA allowed on missed tackles, holding plays faced and tackles made fixed."""
+    plays = plays[plays["season"].isin(seasons) & plays["epa"].notna()]
+    pressure = pd.concat([nfl.load_participation(seasons=[s]).select(["nflverse_game_id", "play_id", "was_pressure"])
+                          .with_columns(pl.col("play_id").cast(pl.Int64)).to_pandas() for s in seasons])
+    dropbacks = plays[plays["qb_dropback"] == 1].merge(
+        pressure, left_on=["game_id", "play_id"], right_on=["nflverse_game_id", "play_id"])
+    dropbacks = dropbacks[dropbacks["was_pressure"].notna()]
+    clean = dropbacks.loc[dropbacks["was_pressure"] == 0, "epa"].mean()
+    pressured = dropbacks[dropbacks["was_pressure"] == 1]
+
+    targets = plays[(plays["pass_attempt"] == 1) & (plays["sack"] == 0) & plays["receiver_player_id"].notna()]
+    average_target = targets["epa"].mean()
+    completions = targets[targets["complete_pass"] == 1]
+    incompletions = targets[(targets["incomplete_pass"] == 1) & (targets["interception"] == 0)]
+    runs = plays[(plays["play_type"] == "run") & (plays["qb_dropback"] == 0)]
+
+    charted = (nfl.load_pfr_advstats(seasons=seasons, stat_type="def", summary_level="week")
+               .filter(pl.col("game_type") == "REG").to_pandas()
+               .groupby(["game_id", "team"])[["def_missed_tackles", "def_tackles_combined"]].sum())
+    games = (plays.groupby(["game_id", "defteam"]).agg(epa=("epa", "sum"), plays=("epa", "size"))
+             .rename_axis(["game_id", "team"]).join(charted, how="inner"))
+    X = np.column_stack([np.ones(len(games)), games["def_missed_tackles"], games["plays"], games["def_tackles_combined"]])
+    missed_tackle_cost = np.linalg.lstsq(X, games["epa"].to_numpy(), rcond=None)[0][1]
+    tackled = tackled_plays(plays)
+    no_loss = tackled[tackled["yards_gained"] >= 0]
+
+    return {
+        "stop": no_loss["epa"].mean() - no_loss.loc[no_loss["stop"], "epa"].mean(),
+        "forced_fumble": tackled["epa"].mean() - plays.loc[plays["fumble_forced"] == 1, "epa"].mean(),
+        "sack": clean - pressured.loc[pressured["sack"] == 1, "epa"].mean(),
+        "non_sack_pressure": clean - pressured.loc[pressured["sack"] == 0, "epa"].mean(),
+        "pressure": clean - pressured["epa"].mean(),
+        "tackle_for_loss": runs["epa"].mean() - runs.loc[runs["yards_gained"] < 0, "epa"].mean(),
+        "missed_tackle": missed_tackle_cost,
+        "coverage_yard": np.polyfit(completions["yards_gained"].clip(-10, 80), completions["epa"], 1)[0],
+        "completion": completions["epa"].mean() - incompletions["epa"].mean(),
+        "interception": average_target - targets.loc[targets["interception"] == 1, "epa"].mean(),
+        "breakup": average_target - incompletions["epa"].mean(),
+    }
+
+
+def load_contracts():
+    """Each player's current contract (the most recently signed active one), each player's latest contract
+    position, and every veteran contract (not a rookie deal) for the market study."""
+    contracts = nfl.load_contracts().to_pandas().dropna(subset=["gsis_id"])
+    active = (contracts[contracts["is_active"]].sort_values("year_signed").drop_duplicates("gsis_id", keep="last"))
+    active["contract_through"] = active["year_signed"] + active["years"] - 1
+    latest_position = contracts.sort_values("year_signed").groupby("gsis_id")["position"].last().rename("room")
+
+    # A rookie deal is any contract signed in or before the player's first NFL season (drafted or not)
+    people = nfl.load_players().select(["gsis_id", "pfr_id", "rookie_season", "birth_date"]).to_pandas()
+    veteran = contracts.merge(people, on="gsis_id", how="left")
+    first_season = veteran["rookie_season"].fillna(veteran["draft_year"])
+    veteran = veteran[(veteran["year_signed"] > first_season) & veteran["apy_cap_pct"].notna()
+                      & veteran["pfr_id"].notna()].copy()
+    veteran["age"] = veteran["year_signed"] - pd.to_datetime(veteran["birth_date"], errors="coerce").dt.year
+    return (active[["gsis_id", "apy", "apy_cap_pct", "year_signed", "contract_through"]], latest_position,
+            veteran[["pfr_id", "year_signed", "apy_cap_pct", "age"]])
+
+
+def build_player_seasons(plays, seasons, rooms):
+    # Each game's dropback share for each defense turns a player's snaps into pass and run snaps
+    share = (plays.groupby(["game_id", "defteam"])["qb_dropback"].mean()
+             .rename("dropback_share").reset_index().rename(columns={"defteam": "team"}))
+    all_snaps = nfl.load_snap_counts(seasons=seasons).filter(pl.col("game_type") == "REG").to_pandas()
+    snaps = all_snaps[all_snaps["defense_snaps"] > 0].merge(share, on=["game_id", "team"], how="left")
+    snaps["pass_snaps"] = snaps["defense_snaps"] * snaps["dropback_share"]
+    snaps["run_snaps"] = snaps["defense_snaps"] - snaps["pass_snaps"]
+    # Snaps and games played on defense by team, so a player traded this season counts for each team that played
+    # them, plus how many games each team has played
+    team_snaps = (snaps.groupby(["season", "team", "pfr_player_id"])
+                  .agg(defense_snaps=("defense_snaps", "sum"), games_played=("game_id", "nunique"))
+                  .reset_index().rename(columns={"pfr_player_id": "pfr_id"})
+                  .merge(all_snaps.groupby(["season", "team"])["game_id"].nunique().rename("team_games"),
+                         left_on=["season", "team"], right_index=True, how="left"))
+
+    # Charted stats game by game. Pro Football Reference's charting can lag the snap counts by a week or
+    # more, so only games that have been charted count, keeping each rate's events and snaps in step.
+    charted = (nfl.load_pfr_advstats(seasons=seasons, stat_type="def", summary_level="week")
+               .filter(pl.col("game_type") == "REG").to_pandas()
+               .rename(columns={"def_pressures": "pressures", "def_sacks": "sacks", "def_times_blitzed": "blitzes",
+                                "def_targets": "targets", "def_completions_allowed": "completions_allowed",
+                                "def_yards_allowed": "yards_allowed", "def_ints": "interceptions",
+                                "def_tackles_combined": "tackles", "def_missed_tackles": "missed_tackles"}))
+    charted_games = charted[["game_id", "team"]].drop_duplicates()
+    games = snaps.merge(charted_games, on=["game_id", "team"]).merge(
+        charted[["game_id", "pfr_player_id", "pressures", "sacks", "blitzes", "targets", "completions_allowed",
+                 "yards_allowed", "interceptions", "tackles", "missed_tackles"]],
+        on=["game_id", "pfr_player_id"], how="left")
+
+    # Tackles for loss and passes defended come from the official box score, matched by player and week
+    ids = nfl.load_players().select(["pfr_id", "gsis_id", "display_name", "birth_date"]).drop_nulls("pfr_id") \
+             .unique("pfr_id").to_pandas()
+    games = (games.merge(ids, left_on="pfr_player_id", right_on="pfr_id", how="left")
+             .drop(columns="pfr_id").rename(columns={"pfr_player_id": "pfr_id"}))
+    box = (nfl.load_player_stats(seasons=seasons, summary_level="week").filter(pl.col("season_type") == "REG")
+           .select(["season", "week", "player_id", "def_tackles_for_loss", "def_pass_defended", "def_fumbles_forced"])
+           .to_pandas()
+           .rename(columns={"player_id": "gsis_id", "def_tackles_for_loss": "tackles_for_loss",
+                            "def_pass_defended": "passes_defended", "def_fumbles_forced": "forced_fumbles"}))
+    games = (games.merge(box, on=["season", "week", "gsis_id"], how="left")
+             .merge(stops_by_game(plays), on=["game_id", "gsis_id"], how="left"))
+
+    count_columns = ["pressures", "sacks", "blitzes", "targets", "completions_allowed", "yards_allowed",
+                     "interceptions", "tackles", "missed_tackles", "tackles_for_loss", "passes_defended",
+                     "forced_fumbles", "run_stops", "pass_stops"]
+    games[count_columns] = games[count_columns].fillna(0)  # no row for a game = nothing recorded
+    players = (games.sort_values("week")
+               .groupby(["season", "pfr_id"])
+               .agg(gsis_id=("gsis_id", "first"), player=("display_name", "first"),
+                    birth_date=("birth_date", "first"), roster_position=("position", "last"),
+                    defense_snaps=("defense_snaps", "sum"), pass_snaps=("pass_snaps", "sum"),
+                    run_snaps=("run_snaps", "sum"), **{c: (c, "sum") for c in count_columns})
+               .reset_index())
+    players["player"] = players["player"].fillna(players["pfr_id"])
+    # Age on September 1 of the season
+    birth = pd.to_datetime(players["birth_date"], errors="coerce")
+    players["age"] = ((pd.to_datetime(players["season"].astype(str) + "-09-01") - birth).dt.days // 365.25)
+    players = players.drop(columns="birth_date").merge(rooms, left_on="gsis_id", right_index=True, how="left")
+    players["room"] = players["room"].fillna(players["roster_position"].map(POSITION_TO_ROOM))
+    players = assign_role_rooms(players[players["room"].isin(ROOMS)].copy())
+
+    # Stops come about three times as often on run snaps as on pass snaps for a linebacker, so a player's stops
+    # are compared with what an average player in the room would make in the same mix of run and pass snaps
+    players["stops"] = players["run_stops"] + players["pass_stops"]
+    complete = players[players["season"] < players["season"].max()]
+    for room in ROOMS:
+        r = complete[complete["room"] == room]
+        in_room = players["room"] == room
+        players.loc[in_room, "expected_stops"] = (
+            players.loc[in_room, "run_snaps"] * r["run_stops"].sum() / r["run_snaps"].sum()
+            + players.loc[in_room, "pass_snaps"] * r["pass_stops"].sum() / r["pass_snaps"].sum())
+    players["coverage_snaps"] = (players["pass_snaps"] - players["blitzes"]).clip(lower=0)
+    players["tackle_attempts"] = players["tackles"] + players["missed_tackles"]
+    # Pressures include sacks, and the official passes-defended count includes interceptions
+    players["non_sack_pressures"] = (players["pressures"] - players["sacks"]).clip(lower=0)
+    players["breakups"] = (players["passes_defended"] - players["interceptions"]).clip(lower=0)
+
+    # Snap share: the player's snaps over the defense's snaps in the charted games they dressed for (played on
+    # defense or special teams), so games missed hurt don't count against them but being benched does.
+    # A defense's snaps in a game are the most any of its players played.
+    dressed = all_snaps.merge(charted_games, on=["game_id", "team"])
+    dressed["game_defense_snaps"] = dressed.groupby(["game_id", "team"])["defense_snaps"].transform("max")
+    dressed = dressed[(dressed["defense_snaps"] > 0) | (dressed["st_snaps"] > 0)]
+    team_defense_snaps = (dressed.groupby(["season", "pfr_player_id"])["game_defense_snaps"].sum()
+                          .rename("team_defense_snaps").rename_axis(["season", "pfr_id"]))
+    players = players.merge(team_defense_snaps, left_on=["season", "pfr_id"], right_index=True, how="left")
+    return players, team_snaps
+
+
+def load_roster(season):
+    """Each player's team and status in the latest week of this season's rosters (RES = injured reserve)."""
+    roster = (nfl.load_rosters_weekly(seasons=[season]).to_pandas().dropna(subset=["pfr_id"])
+              .sort_values("week").drop_duplicates("pfr_id", keep="last"))
+    roster = roster[roster["status"].isin(["ACT", "RES", "INA"])]
+    return roster[["pfr_id", "team", "status"]].rename(columns={"status": "roster_status"})
+
+
+def assign_role_rooms(players):
+    """Contract positions can lag a role change, so edge rushers and linebackers are grouped by what they do
+    on passing plays, using each player's latest season with at least 150 pass snaps. Linebackers are
+    thrown at on 6%+ of pass snaps; edge rushers on under 2% and they create far more pressure."""
+    recent = (players[players["pass_snaps"] >= 150].sort_values("season").groupby("pfr_id").last())
+    targeted = recent["targets"] / recent["pass_snaps"]
+    pressuring = recent["pressures"] / recent["pass_snaps"]
+    rushes = recent.index[(recent["room"] == "LB") & (targeted < 0.04) & (pressuring >= 0.025)]
+    covers = recent.index[(recent["room"] == "ED") & (targeted >= 0.06) & (pressuring < 0.025)]
+    players.loc[players["pfr_id"].isin(rushes), "room"] = "ED"
+    players.loc[players["pfr_id"].isin(covers), "room"] = "LB"
+    return players
+
+
+def estimate_reliability(players, last_complete_season):
+    """Year-to-year correlation of each room stat among players with enough opportunities in both seasons,
+    plus how many opportunities the room gets per defensive snap (used to put impact on a per-snap scale)."""
+    rows = []
+    for room, stats in ROOM_STATS.items():
+        in_room = players[players["room"] == room]
+        complete = in_room[in_room["season"] <= last_complete_season]
+        for stat in stats:
+            events, opps, minimum, lower_is_better, event = STATS[stat]
+            # Every player's team has a full season of snaps, so snap share's minimum is on the player's own snaps
+            sample = events if stat == "snap_share" else opps
+            correlations, sample_sizes = [], []
+            for season in range(FIRST_SEASON, last_complete_season):
+                both = (in_room[(in_room["season"] == season) & (in_room[sample] >= minimum)].set_index("pfr_id")
+                        [[events, opps]].join(in_room[(in_room["season"] == season + 1) & (in_room[sample] >= minimum)]
+                                              .set_index("pfr_id")[[events, opps]], lsuffix="_a", rsuffix="_b",
+                                              how="inner"))
+                if len(both) < 20:
+                    continue
+                correlations.append((both[events + "_a"] / both[opps + "_a"]).corr(both[events + "_b"] / both[opps + "_b"]))
+                sample_sizes.append(both[[opps + "_a", opps + "_b"]].to_numpy().mean())
+            r, n = np.mean(correlations), np.mean(sample_sizes)
+            rows.append({"room": room, "stat": stat, "events": events, "opportunities": opps,
+                         "lower_is_better": lower_is_better, "event": event, "year_to_year_r": r,
+                         "avg_opportunities": n, "k": n * (1 - r) / r if r > 0 else np.nan,
+                         "opportunities_per_snap": complete[opps].sum() / complete["defense_snaps"].sum(),
+                         "used": bool(r >= MIN_RELIABILITY or (room, stat) in KEPT_DESPITE_LOW_REPEAT)})
+    return pd.DataFrame(rows)
+
+
+def score_window(players, method, room, end_season):
+    """Blended rates and z-scores for every player in a room over the three seasons ending at end_season.
+    Returns (blended rates with window snaps, z-scores, each stat's standard deviation)."""
+    used = method[(method["room"] == room) & method["used"]]
+    window = players[(players["room"] == room)
+                     & players["season"].between(end_season - len(WINDOW_WEIGHTS) + 1, end_season)].copy()
+    window["weight"] = window["season"].map({end_season - i: w for i, w in enumerate(WINDOW_WEIGHTS)})
+    blended = pd.DataFrame({"window_snaps": window.groupby("pfr_id")["defense_snaps"].sum()})
+    z = pd.DataFrame(index=blended.index)
+    spreads = {}
+    for _, row in used.iterrows():
+        stat = row["stat"]
+        weighted = (window.assign(e=window[row["events"]] * window["weight"],
+                                  o=window[row["opportunities"]] * window["weight"], raw=window[row["opportunities"]])
+                    .groupby("pfr_id")[["e", "o", "raw"]].sum())
+        league_rate = window[row["events"]].sum() / window[row["opportunities"]].sum()
+        # The season weights set which seasons count most; the pull toward average uses the actual opportunities,
+        # so a player with only this season isn't treated as having three times the sample
+        recent_rate = (weighted["e"] / weighted["o"]).fillna(league_rate)
+        blended[stat] = (recent_rate * weighted["raw"] + row["k"] * league_rate) / (weighted["raw"] + row["k"])
+        # The room's average and spread come from its busier half, so backups don't set the scale
+        busy = weighted["raw"] >= weighted["raw"].median()
+        spreads[stat] = blended.loc[busy, stat].std()
+        z[stat] = (blended[stat] - blended.loc[busy, stat].mean()) / spreads[stat]
+        if row["lower_is_better"]:
+            z[stat] = -z[stat]
+        z[stat] = z[stat].clip(-Z_CAP, Z_CAP)
+    return blended, z, spreads
+
+
+def add_impact(reliability, players, event_values, season):
+    """Each stat's impact: expected points per 100 snaps between an average player and one a standard deviation
+    better. Kept for comparison with the market weights, which are what the grades use."""
+    method = reliability.copy()
+    method["event_value"] = method["event"].map(event_values)
+    for room in ROOMS:
+        _, _, spreads = score_window(players, method, room, season)
+        for stat, spread in spreads.items():
+            i = method.index[(method["room"] == room) & (method["stat"] == stat)]
+            method.loc[i, "spread"] = spread
+            method.loc[i, "impact"] = method.loc[i, "event_value"] * spread * method.loc[i, "opportunities_per_snap"] * 100
+        used = (method["room"] == room) & method["used"]
+        impact_weight = method.loc[used, "year_to_year_r"] * method.loc[used, "impact"]
+        method.loc[used, "impact_share"] = impact_weight / impact_weight.sum()
+    return method
+
+
+def fit_pay(stats, pay, controls):
+    """Non-negative stat weights for pay after removing what the controls explain (Frisch-Waugh)."""
+    residual = lambda v: v - controls @ np.linalg.lstsq(controls, v, rcond=None)[0]
+    stat_residuals = np.column_stack([residual(stats[:, j]) for j in range(stats.shape[1])])
+    pay_residual = residual(pay)
+    coefficients, _ = nnls(stat_residuals, pay_residual)
+    return coefficients, pay_residual, stat_residuals
+
+
+def market_weights(players, method, veteran_contracts, season):
+    """What the NFL pays for in each room: veteran contracts signed 2019 on, against the player's blended stats
+    over the three seasons before signing. Pay (APY as % of the cap) is regressed on the stats' z-scores, holding
+    playing time (log of window snaps) and age fixed, with weights kept non-negative. Each stat's weight is the
+    extra share of the cap the market pays for one standard deviation better; 200 bootstrap resamples give a
+    90% range for each stat's share."""
+    rng = np.random.default_rng(0)
+    for room in ROOMS:
+        used = method.index[(method["room"] == room) & method["used"]]
+        stats = method.loc[used, "stat"].tolist()
+        signed = []
+        for year in range(FIRST_SEASON + 1, season + 1):
+            blended, z, _ = score_window(players, method, room, year - 1)
+            signed.append(veteran_contracts[veteran_contracts["year_signed"] == year]
+                          .merge(z.join(blended["window_snaps"]), left_on="pfr_id", right_index=True))
+        deals = pd.concat(signed, ignore_index=True)
+        deals = deals[deals["window_snaps"] >= MARKET_MIN_SNAPS].dropna(subset=stats + ["age"])
+
+        pay = deals["apy_cap_pct"].to_numpy() * 100
+        # Playing time is a stat itself (snap share), so only age is held fixed
+        controls = np.column_stack([np.ones(len(deals)), deals["age"]])
+        X = deals[stats].to_numpy()
+        coefficients, pay_residual, stat_residuals = fit_pay(X, pay, controls)
+        shares = []
+        for _ in range(MARKET_BOOTSTRAPS):
+            pick = rng.integers(0, len(deals), len(deals))
+            c, _, _ = fit_pay(X[pick], pay[pick], controls[pick])
+            shares.append(c / c.sum() if c.sum() > 0 else c)
+        shares = np.array(shares)
+
+        method.loc[used, "market_cap_pct_per_sd"] = coefficients
+        method.loc[used, "market_share"] = coefficients / coefficients.sum()
+        method.loc[used, "share_low"] = np.percentile(shares, 5, axis=0)
+        method.loc[used, "share_high"] = np.percentile(shares, 95, axis=0)
+        method.loc[method["room"] == room, "market_contracts"] = len(deals)
+        method.loc[method["room"] == room, "market_r2_age"] = 1 - pay_residual.var() / pay.var()
+        method.loc[method["room"] == room, "market_r2_with_stats"] = (
+            1 - (pay_residual - stat_residuals @ coefficients).var() / pay.var())
+    return set_weights(method)
+
+
+def set_weights(method):
+    """The weights the grades use: the market's, with two changes. Snap share is held to SNAP_SHARE_CAP in rooms
+    where more of it hurt the backtest. For corners, lockdown coverage then gets CORNER_LOCKDOWN_SHARE of the
+    rest of the grade. The other stats keep the market's proportions."""
+    method["weight_share"] = method["market_share"]
+    for room in ROOMS:
+        used = method.index[(method["room"] == room) & method["used"]]
+        market = method.loc[used, "market_share"]
+        is_snap = method.loc[used, "stat"] == "snap_share"
+        snap = market[is_snap].sum()
+        if SNAP_SHARE_CAP[room] is not None:
+            snap = min(snap, SNAP_SHARE_CAP[room])
+        rest = market[~is_snap]
+        if room == "CB":
+            lockdown = method.loc[rest.index, "stat"].isin(CORNER_LOCKDOWN_STATS)
+            rest = pd.concat([rest[lockdown] / rest[lockdown].sum() * CORNER_LOCKDOWN_SHARE,
+                              rest[~lockdown] / rest[~lockdown].sum() * (1 - CORNER_LOCKDOWN_SHARE)])
+        else:
+            rest = rest / rest.sum()
+        method.loc[rest.index, "weight_share"] = rest * (1 - snap)
+        method.loc[market[is_snap].index, "weight_share"] = snap
+    method["weight"] = method["weight_share"]
+    return method
+
+
+def grade_players(players, team_snaps, method, season, roster=None):
+    """This season's player grades, using each stat's weight from the method table. With this season's roster,
+    players with a track record who have barely played or not played this season (hurt) are added and listed."""
+    current = (team_snaps[team_snaps["season"] == season]
+               .merge(players[players["season"] == season]
+                      [["pfr_id", "gsis_id", "player", "age", "room", "tackles", "stops"]]
+                      .rename(columns={"tackles": "season_tackles", "stops": "season_stops"}), on="pfr_id")
+               .rename(columns={"defense_snaps": "snaps"}))
+    latest = players[players["season"] <= season].sort_values("season").drop_duplicates("pfr_id", keep="last")
+
+    graded = []
+    for room in ROOMS:
+        blended, z, _ = score_window(players, method, room, season)
+        weights = method[(method["room"] == room) & method["used"]].set_index("stat")["weight"]
+        blended["composite"] = (z[weights.index] * weights).sum(axis=1) / weights.sum()
+
+        room_now = current[current["room"] == room]
+        if roster is not None:
+            # Players whose latest season was in this room, with a track record, on a roster, but no snaps yet
+            proven = blended.index[blended["window_snaps"] >= LIMITED_MIN_WINDOW_SNAPS]
+            missing = (latest[(latest["room"] == room) & latest["pfr_id"].isin(proven)
+                              & ~latest["pfr_id"].isin(current["pfr_id"])]
+                       .merge(roster[["pfr_id", "team"]], on="pfr_id"))
+            missing = missing.assign(season=season, snaps=0, games_played=0, season_tackles=0, season_stops=0,
+                                     age=missing["age"] + season - missing["season"])
+            missing = missing.merge(team_snaps[team_snaps["season"] == season].groupby("team")["team_games"].max(),
+                                    left_on="team", right_index=True, how="left")
+            room_now = pd.concat([room_now, missing[room_now.columns]], ignore_index=True)
+            room_now = room_now.merge(roster[["pfr_id", "roster_status"]], on="pfr_id", how="left")
+        room_now = room_now.merge(blended, left_on="pfr_id", right_index=True, how="left")
+        room_now["composite"] = room_now["composite"].fillna(0)
+        season_snaps = room_now.groupby("pfr_id")["snaps"].transform("sum")
+        regulars = room_now.groupby("pfr_id")["snaps"].sum() >= REGULAR_SNAPS
+        regular_scores = room_now.drop_duplicates("pfr_id").set_index("pfr_id").loc[regulars[regulars].index, "composite"]
+        room_now["grade"] = room_now["composite"].apply(lambda c: round(100 * (regular_scores < c).mean()))
+        # Listed in the rankings: regulars, plus proven players held under the snap minimum this season
+        room_now["limited"] = (season_snaps < REGULAR_SNAPS) & (room_now["window_snaps"] >= LIMITED_MIN_WINDOW_SNAPS)
+        room_now["listed"] = (season_snaps >= REGULAR_SNAPS) | room_now["limited"]
+        graded.append(room_now)
+
+    grades = pd.concat(graded, ignore_index=True)
+    grades["season"] = season
+    return grades
+
+
+def team_area_results(plays, season):
+    """This season's team result in each room's main area of responsibility."""
+    plays = plays[(plays["season"] == season) & plays["epa"].notna()]
+    positions = nfl.load_players().select(["gsis_id", "position"]).to_pandas().set_index("gsis_id")["position"]
+    targets = plays[(plays["pass_attempt"] == 1) & (plays["sack"] == 0) & plays["receiver_player_id"].notna()].copy()
+    receiver = targets["receiver_player_id"].map(positions)
+    by_team = lambda df: df.groupby("defteam")["epa"].mean()
+    dropbacks = plays[plays["qb_dropback"] == 1]
+    return pd.DataFrame({
+        "sack_rate": dropbacks.groupby("defteam")["sack"].mean(),
+        "run_epa": by_team(plays[(plays["play_type"] == "run") & (plays["qb_dropback"] == 0)]),
+        "te_rb_epa": by_team(targets[receiver.isin(["TE", "RB", "FB"])]),
+        "wr_outside_epa": by_team(targets[(receiver == "WR") & targets["pass_location"].isin(["left", "right"])]),
+        "deep_epa": by_team(targets[targets["air_yards"] >= 15]),
+    })
+
+
+def grade_rooms(grades, areas):
+    rooms = []
+    for room in ROOMS:
+        g = grades[(grades["room"] == room) & (grades["snaps"] > 0)]  # players yet to play add nothing or cost
+        team = g.groupby("team").apply(
+            lambda t: pd.Series({"room_score": np.average(t["composite"], weights=t["snaps"]),
+                                 "players": t["pfr_id"].nunique(),
+                                 "cap_pct": t.drop_duplicates("pfr_id")["apy_cap_pct"].fillna(0).sum(),
+                                 "apy_millions": t.drop_duplicates("pfr_id")["apy"].fillna(0).sum()}),
+            include_groups=False)
+        # Value: how far the room is above or below the score expected for what it costs
+        slope, intercept = np.polyfit(team["cap_pct"], team["room_score"], 1)
+        team["value"] = team["room_score"] - (intercept + slope * team["cap_pct"])
+        team["grade_rank"] = team["room_score"].rank(ascending=False, method="min").astype(int)
+        team["spend_rank"] = team["cap_pct"].rank(ascending=False, method="min").astype(int)
+        team["value_rank"] = team["value"].rank(ascending=False, method="min").astype(int)
+
+        area_stat, area_label, higher_is_better = ROOM_AREA[room]
+        team["area_label"] = area_label
+        team["area_value"] = areas[area_stat]
+        team["area_rank"] = areas[area_stat].rank(ascending=not higher_is_better, method="min").astype(int)
+        team["confidence"], team["confidence_note"] = CONFIDENCE[room]
+        team["room"], team["room_name"] = room, ROOM_NAMES[room]
+        rooms.append(team.reset_index())
+    out = pd.concat(rooms, ignore_index=True)
+    out["season"] = grades["season"].iloc[0]
+    return out.astype({"players": "int64"})
+
+
+def main():
+    season = nfl.get_current_season()
+    seasons = list(range(FIRST_SEASON, season + 1))
+    print(f"Downloading {FIRST_SEASON}-{season} plays, snaps, player stats and contracts from nflverse...")
+    plays = load_plays(seasons)
+    contracts, rooms, veteran_contracts = load_contracts()
+    players, team_snaps = build_player_seasons(plays, seasons, rooms)
+
+    print("Testing which stats repeat year to year, and measuring what each event is worth...")
+    reliability = estimate_reliability(players, season - 1)
+    event_values = measure_event_values(plays, seasons[:-1])
+    print({event: round(value, 3) for event, value in event_values.items()})
+    method = add_impact(reliability, players, event_values, season)
+
+    print("Measuring what the NFL pays for in each room...")
+    method = market_weights(players, method, veteran_contracts, season)
+    print(method[["room", "stat", "year_to_year_r", "impact_share", "weight_share", "share_low", "share_high"]]
+          .round(3).to_string(index=False))
+
+    print(f"Grading {season} players and rooms...")
+    grades = (grade_players(players, team_snaps, method, season, load_roster(season))
+              .merge(contracts, on="gsis_id", how="left"))
+    rooms_table = grade_rooms(grades, team_area_results(plays, season))
+    grades = grades.astype({"snaps": "int64", "games_played": "int64"})
+    upload([("player_grades", grades), ("room_grades", rooms_table), ("grade_stats", method)])
+
+
+if __name__ == "__main__":
+    main()

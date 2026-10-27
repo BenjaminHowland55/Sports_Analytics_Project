@@ -1,11 +1,14 @@
 {# Shared number formatting. Import with: {% import "_format.html" as f %} #}
 
-{# kind: "count" (1,053), "epa" (+0.088), "pct" (25.8%); a missing value shows a dash #}
+{# kind: "count" (1,053), "epa" (+0.088), "pct" (25.8%), "dec" (0.84), "money" ($19.1M, from millions);
+   a missing value shows a dash #}
 {% macro value(v, kind) -%}
   {%- if v is none -%}—
   {%- elif kind == "epa" -%}{{ ("%+.3f"|format(v))|replace("-", "−") }}
   {%- elif kind == "pct" -%}{{ "%.1f"|format(v * 100) }}%
-  {%- elif kind == "count" -%}{{ "{:,}".format(v) }}
+  {%- elif kind == "count" -%}{{ "{:,}".format(v|int) }}
+  {%- elif kind == "dec" -%}{{ "%.2f"|format(v) }}
+  {%- elif kind == "money" -%}${{ "%.1f"|format(v) }}M
   {%- else -%}{{ v }}
   {%- endif -%}
 {%- endmacro %}
@@ -14,5 +17,12 @@
 {% macro rank(r) -%}
   {%- if r is not none -%}
   <span class="rank {{ 'rank-top' if r <= 10 else ('rank-mid' if r <= 22 else 'rank-bottom') }}">#{{ r }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{# Player grade (0-100 percentile) as a tag: 70+ / 30-69 / under 30 #}
+{% macro grade(g) -%}
+  {%- if g is not none -%}
+  <span class="rank {{ 'rank-top' if g >= 70 else ('rank-mid' if g >= 30 else 'rank-bottom') }}">{{ g }}</span>
   {%- endif -%}
 {%- endmacro %}

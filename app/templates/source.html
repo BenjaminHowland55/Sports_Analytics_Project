@@ -28,6 +28,20 @@
         Play-level charting: whether the quarterback was pressured, how many players rushed,
         man or zone coverage, and which defenders were on the field.
       </dd>
+      <dt>Pro Football Reference defense stats (<code>load_pfr_advstats</code>)</dt>
+      <dd>
+        Game-by-game charting for each defender from 2018: pressures, sacks, blitzes, targets, completions and
+        yards allowed in coverage, tackles, and missed tackles. Used on the Report Card.
+      </dd>
+      <dt>Snap counts (<code>load_snap_counts</code>)</dt>
+      <dd>How many defensive plays each player was on the field for, game by game.</dd>
+      <dt>Player stats (<code>load_player_stats</code>)</dt>
+      <dd>Official box-score stats, including tackles for loss and passes defended.</dd>
+      <dt>Contracts (<code>load_contracts</code>)</dt>
+      <dd>
+        Contract data from <a href="https://overthecap.com/">Over The Cap</a>: yearly value, share of the salary cap
+        in the year signed, length, and the position each player is listed at.
+      </dd>
     </dl>
   </section>
 
@@ -38,6 +52,7 @@
       <li>It keeps regular-season run and pass plays only, leaving out playoffs, special teams, and plays wiped out by penalties.</li>
       <li>It matches each play to its charting row (2016 on) and totals everything into one row per defense per season.</li>
       <li>It uploads the result to our database. The Stats page reads Arizona's rows from the <code>team_defense_history</code> table.</li>
+      <li>A second script, <code>position_grades.py</code>, builds the Report Card from the player datasets above and uploads it to the <code>player_grades</code>, <code>room_grades</code>, and <code>grade_stats</code> tables. The Report Card page explains every formula.</li>
     </ol>
   </section>
 

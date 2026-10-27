@@ -73,6 +73,53 @@ def get_home_cards():
     return {"season": row["season"], "teams": row["teams"]}, cards
 
 
+ROOM_ORDER = ["ED", "IDL", "LB", "CB", "S"]
+TOP_PLAYERS = 10
+
+
+def get_report_card():
+    """Room grades for every team, Arizona's graded players, the league's best at each position, and the
+    stats behind the grades."""
+    with engine.connect() as conn:
+        rooms = [dict(r._mapping) for r in conn.execute(text("SELECT * FROM room_grades"))]
+        players = [dict(r._mapping) for r in conn.execute(
+            text("SELECT * FROM player_grades WHERE team = 'ARI' ORDER BY snaps DESC"))]
+        listed = [dict(r._mapping) for r in conn.execute(text(
+            "SELECT * FROM player_grades WHERE listed = 1 ORDER BY composite DESC, snaps DESC"))]
+        stats = [dict(r._mapping) for r in conn.execute(text("SELECT * FROM grade_stats"))]
+    if not rooms:
+        return None
+
+    # A player traded this season has a row per team; rank him once, under the team he's played most for
+    top = {room: [] for room in ROOM_ORDER}
+    seen = set()
+    for p in sorted(listed, key=lambda p: -p["snaps"]):
+        if p["pfr_id"] not in seen:
+            seen.add(p["pfr_id"])
+            top[p["room"]].append(p)
+    top = {room: sorted(ps, key=lambda p: -p["composite"])[:TOP_PLAYERS] for room, ps in top.items()}
+
+    order = {room: i for i, room in enumerate(ROOM_ORDER)}
+    by_team = {}
+    for row in rooms:
+        team = by_team.setdefault(row["team"], {"team": row["team"], "cap_pct": 0.0})
+        team[row["room"]] = row["grade_rank"]
+        team["cap_pct"] += row["cap_pct"]
+    return {
+        "season": rooms[0]["season"],
+        "arizona": sorted((r for r in rooms if r["team"] == "ARI"), key=lambda r: order[r["room"]]),
+        "league": sorted(by_team.values(), key=lambda t: t["team"]),
+        "players": {room: [p for p in players if p["room"] == room] for room in ROOM_ORDER},
+        "top": top,
+        "room_names": {r["room"]: r["room_name"] for r in rooms},
+        "used_stats": {room: [s["stat"] for s in stats if s["room"] == room and s["used"]] for room in ROOM_ORDER},
+        # Within each room, the biggest weights first and unused stats last
+        "stats": sorted(stats, key=lambda s: (order[s["room"]], -(s["weight_share"] or 0), -s["year_to_year_r"])),
+        # The market study's sample and fit, one row per room
+        "market": [next(s for s in stats if s["room"] == room) for room in ROOM_ORDER],
+    }
+
+
 # The footer's "data through" line, refreshed at most once an hour so pages don't all hit the database
 _data_freshness = {"checked": 0.0, "value": None}
 
@@ -116,6 +163,16 @@ def stats():
         app.logger.exception("Could not load team_defense_history rows")
         rows = []
     return render_template("stats.html", rows=rows)
+
+
+@app.route("/report-card")
+def report_card():
+    try:
+        card = get_report_card()
+    except SQLAlchemyError:
+        app.logger.exception("Could not load report card tables")
+        card = None
+    return render_template("report_card.html", card=card, room_order=ROOM_ORDER)
 
 
 @app.route("/analysis")
