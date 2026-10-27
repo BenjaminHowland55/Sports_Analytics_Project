@@ -2,7 +2,9 @@
 // Each cell's data-value holds the raw number; an empty data-value (no data) always sorts last.
 document.querySelectorAll("table.sortable").forEach((table) => {
   const body = table.tBodies[0];
-  const headers = Array.from(table.tHead.rows[0].cells);
+  // The last header row holds the column names (a row of group labels may sit above it)
+  const headerRows = table.tHead.rows;
+  const headers = Array.from(headerRows[headerRows.length - 1].cells);
 
   headers.forEach((header, column) => {
     header.querySelector("button").addEventListener("click", () => {

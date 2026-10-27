@@ -1,0 +1,18 @@
+{# Shared number formatting. Import with: {% import "_format.html" as f %} #}
+
+{# kind: "count" (1,053), "epa" (+0.088), "pct" (25.8%); a missing value shows a dash #}
+{% macro value(v, kind) -%}
+  {%- if v is none -%}—
+  {%- elif kind == "epa" -%}{{ ("%+.3f"|format(v))|replace("-", "−") }}
+  {%- elif kind == "pct" -%}{{ "%.1f"|format(v * 100) }}%
+  {%- elif kind == "count" -%}{{ "{:,}".format(v) }}
+  {%- else -%}{{ v }}
+  {%- endif -%}
+{%- endmacro %}
+
+{# League rank as a tag: top 10 / middle / bottom 10 (#1 = best). The number is always shown, not just the colour. #}
+{% macro rank(r) -%}
+  {%- if r is not none -%}
+  <span class="rank {{ 'rank-top' if r <= 10 else ('rank-mid' if r <= 22 else 'rank-bottom') }}">#{{ r }}</span>
+  {%- endif -%}
+{%- endmacro %}

@@ -1,13 +1,35 @@
 {% extends "base.html" %}
+{% import "_format.html" as f %}
 
 {% block title %}Home{% endblock %}
 
 {% block content %}
-  <h1>Rebuilding the Red Wall</h1>
-  <p class="subtitle">A Data Plan for the Arizona Cardinals Defense</p>
-  <h2>Project Overview</h2>
-  <section class="placeholder">
+  <section class="hero">
+    <p class="eyebrow">Arizona Cardinals Defense</p>
+    <h1>Rebuilding the Red Wall</h1>
+    <p class="subtitle">A data plan for what the Cardinals should focus on in the draft, free agency, and scheme to fix their defense.</p>
+  </section>
+
+  {% if cards %}
+  <section aria-labelledby="snapshot-heading">
+    <h2 id="snapshot-heading">{{ card_season.season }} Snapshot</h2>
+    <p class="section-note">Arizona's league rank in {{ card_season.season }} (#1 = best of {{ card_season.teams }}).</p>
+    <div class="stat-cards">
+      {% for card in cards %}
+      <article class="stat-card {{ 'tier-top' if card.rank <= 10 else ('tier-mid' if card.rank <= 22 else 'tier-bottom') }}">
+        <h3>{{ card.label }}</h3>
+        <p class="stat-card-rank">#{{ card.rank }}<span> of {{ card_season.teams }}</span></p>
+        <p class="stat-card-detail">{{ f.value(card.value, "pct" if card.stat.endswith("_rate") else "epa") }} {{ card.measure }}</p>
+      </article>
+      {% endfor %}
+    </div>
+    <p class="section-note"><a href="{{ url_for('stats') }}">See every season on the Stats page →</a></p>
+  </section>
+  {% endif %}
+
+  <section aria-labelledby="overview-heading">
+    <h2 id="overview-heading">Project Overview</h2>
     <!-- Write the overview of the project here. -->
-    <p>Project overview coming soon.</p>
+    <p class="in-progress-note">Overview in progress.</p>
   </section>
 {% endblock %}

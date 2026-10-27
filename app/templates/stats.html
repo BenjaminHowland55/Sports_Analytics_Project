@@ -1,38 +1,47 @@
 {% extends "base.html" %}
+{% import "_format.html" as f %}
 
 {% block title %}Stats{% endblock %}
 
 {% block content %}
-  {# (database column, label shown on the page, has a league rank) #}
+  {# (database column, label, number format, has a league rank, definition shown on hover) #}
   {% set columns = [
-    ("season", "Season", false),
-    ("plays", "Plays", false),
-    ("epa_per_play_allowed", "EPA per Play Allowed", true),
-    ("pass_epa_per_dropback_allowed", "Pass EPA per Dropback Allowed", true),
-    ("rush_epa_per_carry_allowed", "Rush EPA per Carry Allowed", true),
-    ("explosive_play_rate_allowed", "Explosive Play Rate Allowed", true),
-    ("pressure_rate", "Pressure Rate", true),
-    ("four_man_pressure_rate", "4-Man Rush Pressure Rate", true),
-    ("clean_pocket_epa_allowed", "Clean-Pocket EPA Allowed", true),
-    ("blitz_rate", "Blitz Rate", false),
-    ("man_coverage_rate", "Man Coverage Rate", false),
+    ("season", "Season", "season", false, "Regular season. A season still being played shows how many weeks it covers."),
+    ("plays", "Plays", "count", false, "Run and pass plays the defense faced."),
+    ("epa_per_play_allowed", "EPA per Play Allowed", "epa", true, "Average expected points allowed per play. Lower is better."),
+    ("pass_epa_per_dropback_allowed", "Pass EPA per Dropback Allowed", "epa", true, "Average EPA allowed on dropbacks, including sacks and scrambles. Lower is better."),
+    ("rush_epa_per_carry_allowed", "Rush EPA per Carry Allowed", "epa", true, "Average EPA allowed on designed runs. Lower is better."),
+    ("explosive_play_rate_allowed", "Explosive Play Rate Allowed", "pct", true, "Share of plays gaining 20+ yards on a dropback or 10+ on a run. Lower is better."),
+    ("pressure_rate", "Pressure Rate", "pct", true, "Share of dropbacks where the QB was hurried, hit, or sacked. Higher is better."),
+    ("four_man_pressure_rate", "4-Man Rush Pressure Rate", "pct", true, "Pressure rate when rushing 4 or fewer, so no blitz help. Higher is better."),
+    ("clean_pocket_epa_allowed", "Clean-Pocket EPA Allowed", "epa", true, "EPA allowed when the QB was not pressured; mostly reflects coverage. Lower is better."),
+    ("blitz_rate", "Blitz Rate", "pct", false, "Share of dropbacks with 5 or more rushers. A play-calling choice, so not ranked."),
+    ("man_coverage_rate", "Man Coverage Rate", "pct", false, "Share of charted dropbacks in man coverage. A play-calling choice, so not ranked."),
   ] %}
-  <h1>Arizona Cardinals Defense by Season</h1>
+  {# Column groups for the row above the headers (label, number of columns). The first cell sits over Season. #}
+  {% set groups = [("", 1), ("Overall", 2), ("Pass vs. Run", 3), ("Pass Rush", 2), ("Coverage", 1), ("Scheme", 2)] %}
+
+  <p class="eyebrow">Stats</p>
+  <h1>Arizona Defense by Season</h1>
   {% if rows %}
   <p class="table-note">
     Regular season, {{ rows[-1].season }}–{{ rows[0].season }}. Click a column name to sort it from high to low;
-    click again for low to high. The small <span class="rank">#</span> after a number is Arizona's league rank that
-    season (#1 = best). Lower EPA and explosive-play numbers are better; higher pressure numbers are better.
+    click again for low to high. Point at a column name to see what it means. Tags show Arizona's league rank that
+    season: {{ f.rank(3) }} top 10, {{ f.rank(16) }} middle, {{ f.rank(27) }} bottom 10.
     A dash (—) means the season wasn't charted: pressure, clean-pocket, and blitz stats start in 2016, man coverage in 2018.
-    See <a href="{{ url_for('source') }}">Source</a> for what each column means.
   </p>
   <div class="table-wrap">
-    <table class="sortable">
+    <table class="sortable stat-table">
       <thead>
+        <tr class="group-row">
+          {% for label, span in groups %}
+          <th colspan="{{ span }}" scope="colgroup">{{ label }}</th>
+          {% endfor %}
+        </tr>
         <tr>
-          {% for key, label, ranked in columns %}
-          <th{% if key == "season" %} aria-sort="descending"{% endif %}>
-            <button type="button">{{ label }}</button>
+          {% for key, label, kind, ranked, definition in columns %}
+          <th scope="col" class="{{ 'num' if kind != 'season' }}"{% if key == "season" %} aria-sort="descending"{% endif %}>
+            <button type="button" title="{{ definition }}">{{ label }}</button>
           </th>
           {% endfor %}
         </tr>
@@ -40,18 +49,12 @@
       <tbody>
         {% for row in rows %}
         <tr>
-          {% for key, label, ranked in columns %}
-          {% set value = row[key] %}
-          <td data-value="{{ '' if value is none else value }}">
-            {%- if value is none -%}
-              —
-            {%- elif value is float -%}
-              {{ "%.3f"|format(value) }}
-            {%- else -%}
-              {{ value }}
-            {%- endif -%}
-            {%- if ranked and row[key ~ "_rank"] is not none %} <span class="rank">#{{ row[key ~ "_rank"] }}</span>{% endif -%}
-            {%- if key == "season" and row.in_progress %} <span class="in-progress">(through week {{ row.last_week }})</span>{% endif -%}
+          {% for key, label, kind, ranked, definition in columns %}
+          {% set v = row[key] %}
+          <td class="{{ 'num' if kind != 'season' }}" data-value="{{ '' if v is none else v }}">
+            {{- f.value(v, kind) -}}
+            {%- if ranked %} {{ f.rank(row[key ~ "_rank"]) }}{% endif -%}
+            {%- if key == "season" and row.in_progress %} <span class="in-progress">wk {{ row.last_week }}</span>{% endif -%}
           </td>
           {% endfor %}
         </tr>
@@ -59,6 +62,7 @@
       </tbody>
     </table>
   </div>
+  <p class="section-note">See <a href="{{ url_for('source') }}">Source</a> for how each stat is calculated.</p>
   <script src="{{ url_for('static', filename='sort-table.js') }}" defer></script>
   {% else %}
   <p>No data available right now.</p>

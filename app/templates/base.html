@@ -4,6 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Home{% endblock %} | Rebuilding the Red Wall</title>
+  <meta name="description" content="A data plan for improving the Arizona Cardinals defense, using NFL play-by-play data from 2000 to today.">
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Oswald:wght@500;600;700&display=swap">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -16,16 +21,32 @@
   ] %}
   <header class="site-header">
     <div class="header-top">
-      <a class="site-title" href="{{ url_for('home') }}">Rebuilding the Red Wall</a>
+      <div class="container">
+        <a class="site-title" href="{{ url_for('home') }}">
+          <img src="{{ url_for('static', filename='favicon.svg') }}" alt="" width="28" height="28">
+          Rebuilding the Red Wall
+        </a>
+      </div>
     </div>
     <nav class="header-nav" aria-label="Main">
-      {% for endpoint, label in nav_items %}
-      <a href="{{ url_for(endpoint) }}"{% if request.endpoint == endpoint %} class="active" aria-current="page"{% endif %}>{{ label }}</a>
-      {% endfor %}
+      <div class="container">
+        <div class="nav-links">
+          {% for endpoint, label in nav_items %}
+          <a href="{{ url_for(endpoint) }}"{% if request.endpoint == endpoint %} class="active" aria-current="page"{% endif %}>{{ label }}</a>
+          {% endfor %}
+        </div>
+      </div>
     </nav>
   </header>
-  <main>
+  <main class="container">
     {% block content %}{% endblock %}
   </main>
+  <footer class="site-footer">
+    <div class="container">
+      <span>Data: <a href="https://nflverse.nflverse.com/">nflverse</a> via nflreadpy</span>
+      {% if data_through %}<span>Data through {{ data_through.season }} Week {{ data_through.week }}</span>{% endif %}
+      <span><a href="{{ github_url }}">Project on GitHub</a></span>
+    </div>
+  </footer>
 </body>
 </html>
