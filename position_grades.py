@@ -347,6 +347,15 @@ def build_player_seasons(plays, seasons, rooms):
     return players, team_snaps
 
 
+def load_nickels(season):
+    """gsis_ids of the defensive backs listed at nickel (NB) on each team's latest depth chart this season. Shown as
+    a tag only: depth charts before 2025 don't list a nickel, and hybrids are listed inconsistently, so it isn't
+    reliable enough to grade by."""
+    charts = nfl.load_depth_charts(seasons=[season]).to_pandas()
+    latest = charts[charts["dt"] == charts.groupby("team")["dt"].transform("max")]
+    return set(latest.loc[latest["pos_abb"] == "NB", "gsis_id"].dropna())
+
+
 def load_roster(season):
     """Each player's team and status in the latest week of this season's rosters (RES = injured reserve)."""
     roster = (nfl.load_rosters_weekly(seasons=[season]).to_pandas().dropna(subset=["pfr_id"])
@@ -710,6 +719,7 @@ def main():
     print(f"Grading {season} players and rooms...")
     grades = (grade_players(players, team_snaps, method, season, load_roster(season))
               .merge(contracts, on="gsis_id", how="left"))
+    grades["nickel"] = grades["gsis_id"].isin(load_nickels(season)) & grades["room"].isin(["CB", "S"])
     rooms_table = grade_rooms(grades, team_area_results(plays, season))
     grades = grades.astype({"snaps": "int64", "games_played": "int64"})
     upload([("player_grades", grades), ("room_grades", rooms_table), ("grade_stats", method)])

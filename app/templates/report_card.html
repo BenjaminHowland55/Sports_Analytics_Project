@@ -42,6 +42,9 @@
     {%- endif -%}
   {%- endmacro %}
   {% macro status(p) -%}
+    {%- if p.nickel -%}
+    <span class="player-note" title="Listed at nickel (slot) on his team's depth chart. Shown for reference; grades still compare him with all {{ 'corners' if p.room == 'CB' else 'safeties' }}.">Nickel</span>
+    {%- endif -%}
     {%- if p.limited -%}
     <span class="player-note">{{ "Injured reserve" if p.roster_status == "RES" else "Limited this season" }}</span>
     {%- endif -%}
@@ -161,6 +164,8 @@
       The {{ card.top.values()|first|length }} highest grades in each room. Players with 100+ snaps this season are ranked,
       along with proven players (800+ snaps over the three seasons) who have been hurt or limited this season, so an
       injury doesn't drop them off the list. Games = games played on defense of the team's games so far.
+      "Nickel" marks defensive backs listed in the slot on their team's depth chart; it's for reference and doesn't
+      change their grade.
       Trend = the player's grade in each of his last three seasons on its own (hover for the numbers):
       ▲ Improving if it rose each season, ▼ Declining if it fell each season, ▶ Steady otherwise.
       Players 25 and under are Improving with any rise in grade or a 25+ point jump in playing time, as long as their
