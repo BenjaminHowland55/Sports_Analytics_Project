@@ -85,8 +85,11 @@ CORNER_LOCKDOWN_SHARE = 0.50
 # who watch every snap think, and a big part of pay. Uncapped, it put the best-paid players at the top in every
 # room (rank match with veteran pay: edge 0.56 -> 0.84, corners 0.23 -> 0.66, linebackers 0.17 -> 0.68) and
 # improved the edge and corner backtests, but it crowded out the stats that separate linebackers and safeties on
-# the field. So its weight is capped where the 2020-2025 backtest started to drop (None = no cap).
-SNAP_SHARE_CAP = {"ED": None, "IDL": 0.30, "LB": 0.20, "CB": None, "S": 0.20}
+# the field. So its weight is capped where the 2020-2025 backtest started to drop (None = no cap). Edge rushers:
+# the market gives it 44%, which let a team's rotation (Houston splitting snaps between its edge rushers) outweigh
+# sacks and tackles for loss; capping it at 35% slightly improved the backtest (sack rate 0.19 -> 0.20, overall
+# 0.23 -> 0.24) for a small drop in the pay match (0.85 -> 0.81); lower caps kept costing pay match for no gain.
+SNAP_SHARE_CAP = {"ED": 0.35, "IDL": 0.30, "LB": 0.20, "CB": None, "S": 0.20}
 ROOMS = ["ED", "IDL", "LB", "CB", "S"]
 ROOM_NAMES = {"ED": "Edge Rushers", "IDL": "Interior Line", "LB": "Linebackers", "CB": "Cornerbacks", "S": "Safeties"}
 
@@ -130,7 +133,7 @@ ASSIST_COLUMNS = ["assist_tackle_1_player_id", "assist_tackle_2_player_id",
 # Backtest 2020-2025: each room graded from earlier seasons only, using that season's roster, then compared
 # with the team's result that season (average correlation across the six seasons)
 CONFIDENCE = {
-    "ED": ("Moderate", "Matched overall EPA allowed (r = 0.23) and team sack rate (r = 0.19)"),
+    "ED": ("Moderate", "Matched overall EPA allowed (r = 0.24) and team sack rate (r = 0.20)"),
     "IDL": ("Moderate", "Matched team sack rate (r = 0.24)"),
     "LB": ("Fair", "Matched overall EPA allowed (r = 0.14) and throws to tight ends and running backs (r = 0.13)"),
     "CB": ("Moderate", "Matched overall EPA allowed (r = 0.25) and outside throws (r = 0.21)"),
