@@ -23,6 +23,24 @@
   {% macro games(p) -%}
     {{ p.games_played }}{% if p.team_games %} of {{ p.team_games }}{% endif %}
   {%- endmacro %}
+  {# Trend: a small line of the player's grade in each window season on its own (0 at the bottom, 100 at the
+     top), plus the label in words so it doesn't rely on colour #}
+  {% macro trend(p) -%}
+    {%- if p.trend -%}
+    {%- set seasons = p.trend_seasons.split(",") -%}
+    {%- set grades = p.trend_grades.split(",")|map("int")|list -%}
+    {%- set step = 40 / (grades|length - 1) -%}
+    <span class="trend trend-{{ p.trend|lower }}"
+          title="{% for s in seasons %}{{ s }}: {{ grades[loop.index0] }}{{ ' · ' if not loop.last }}{% endfor %} (grade in each season on its own)">
+      <svg viewBox="-3 -3 46 26" width="46" height="26" aria-hidden="true">
+        <polyline points="{% for g in grades %}{{ loop.index0 * step }},{{ 20 - g / 5 }} {% endfor %}" />
+        {% for g in grades %}<circle cx="{{ loop.index0 * step }}" cy="{{ 20 - g / 5 }}" r="2.2" />{% endfor %}
+      </svg>
+      {{ {"Improving": "▲", "Declining": "▼", "Steady": "▶"}[p.trend] }} {{ p.trend }}
+    </span>
+    {%- else -%}<span class="trend trend-none" title="Needs two seasons with a full sample">—</span>
+    {%- endif -%}
+  {%- endmacro %}
   {% macro status(p) -%}
     {%- if p.limited -%}
     <span class="player-note">{{ "Injured reserve" if p.roster_status == "RES" else "Limited this season" }}</span>
@@ -49,7 +67,7 @@
   {% if card %}
   <p class="table-note">
     Each of Arizona's five defensive position rooms, graded against the same room on the other 31 teams, and compared
-    with what it costs. Grades blend the {{ card.season - 2 }}–{{ card.season }} seasons, with {{ card.season }} counted most,
+    with what it costs. Grades blend {{ card.season }} (counted most) with each player's two most recent healthy seasons,
     and use only stats that repeat from one season to the next. Rooms are made up of the players who have taken
     defensive snaps for each team in {{ card.season }}. See <a href="#method">How the grades work</a> for every formula.
   </p>
@@ -142,6 +160,10 @@
       The {{ card.top.values()|first|length }} highest grades in each room. Players with 100+ snaps this season are ranked,
       along with proven players (800+ snaps over the three seasons) who have been hurt or limited this season, so an
       injury doesn't drop them off the list. Games = games played on defense of the team's games so far.
+      Trend = the player's grade in each of his last three seasons on its own (hover for the numbers):
+      ▲ Improving if it rose each season, ▼ Declining if it fell each season, ▶ Steady otherwise.
+      Players 25 and under are Improving with any rise in grade or a 25+ point jump in playing time, as long as their
+      grade hasn't fallen more than 20 points.
     </p>
     <div class="top-grid">
       {% for room in room_order %}
@@ -155,6 +177,7 @@
               <th scope="col">Team</th>
               <th scope="col" class="num">Grade</th>
               <th scope="col" class="num">Games</th>
+              <th scope="col">Trend</th>
             </tr>
           </thead>
           <tbody>
@@ -165,6 +188,7 @@
               <td>{{ p.team }}</td>
               <td class="num">{{ f.grade(p.grade) }}</td>
               <td class="num">{{ games(p) }}</td>
+              <td>{{ trend(p) }}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -194,6 +218,7 @@
             <th scope="col" class="num">Snaps</th>
             <th scope="col" class="num" title="Games played on defense of the team's games so far">Games</th>
             <th scope="col" class="num">Grade</th>
+            <th scope="col">Trend</th>
             <th scope="col" class="num" title="This season's combined tackles (solo + assisted), in charted games">Tackles</th>
             <th scope="col" class="num" title="This season's tackles that left the offense with a failed play">Stops</th>
             {% for stat in used %}
@@ -212,6 +237,7 @@
             <td class="num">{{ f.value(p.snaps, "count") }}</td>
             <td class="num">{{ games(p) }}</td>
             <td class="num">{{ f.grade(p.grade) }}</td>
+            <td>{{ trend(p) }}</td>
             <td class="num">{{ f.value(p.season_tackles, "count") }}</td>
             <td class="num">{{ "—" if p.season_stops is none else "%g"|format(p.season_stops) }}</td>
             {% for stat in used %}
@@ -249,8 +275,9 @@
       </li>
       <li>
         <strong>Three-season blend, pulled toward average.</strong>
-        <code>recent rate = Σ weight × events ÷ Σ weight × opportunities</code>, with weights 3, 2, 1 for this season, last season,
-        and the season before, then <code>blended rate = (recent rate × opportunities + k × league rate) ÷ (opportunities + k)</code>,
+        <code>recent rate = Σ weight × events ÷ Σ weight × opportunities</code>, with weights 3, 2, 1 for this season and the
+        player's two most recent healthy seasons before it (8+ games; a season lost to injury is skipped and an earlier one
+        used, looking back up to four seasons), then <code>blended rate = (recent rate × opportunities + k × league rate) ÷ (opportunities + k)</code>,
         with <code>k = average opportunities × (1 − r) ÷ r</code>. The noisier a stat, the bigger k, so a small sample is pulled
         harder toward the league rate. The pull uses the player's actual opportunities, not the weighted ones, so a rookie
         isn't treated as having three times the sample he has. In testing, this predicted
@@ -288,6 +315,15 @@
       <li><strong>Grade (0–100).</strong> The composite's percentile among players in the same room with 100+ snaps this season.
         Players on a roster with 800+ snaps over the three seasons who are under 100 snaps this season (hurt, or just back)
         are still graded on that track record and listed, tagged "Injured reserve" or "Limited this season".</li>
+      <li><strong>Trend.</strong> Each season in the player's window is graded on its own, as a percentile among that
+        season's players in the room with a full sample (8+ games; this season, 100+ snaps and at least half the games so far).
+        Every player is pulled toward average by the same amount here, so missing games doesn't by itself make a player look
+        like he declined. Players 26 and older: a rise each season = Improving, a drop each season = Declining, anything
+        else = Steady. Players 25 and under get room on the way down, since grades typically move about 20 points from one
+        season to the next: any rise in grade counts as improvement, and so does a season his snap share rose 25+ points
+        (the coaches trusting him with more) unless his grade fell more than 20; a smaller drop counts as no change. A young
+        player with any improvement and no drop of more than 20 is Improving. With two seasons, the one change decides it;
+        with one, no trend.</li>
     </ol>
     <h3 class="room-heading">Grading a room and its contracts</h3>
     <ol>

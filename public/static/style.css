@@ -381,12 +381,16 @@ main section .table-wrap + .table-wrap {
 /* The league's best at each position: one small table per room, side by side when there's room */
 .top-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 32rem), 1fr));
   gap: 1rem;
 }
 
 .top-grid .table-wrap + .table-wrap {
   margin-top: 0;
+}
+
+.top-grid .stat-table {
+  width: 100%;
 }
 
 .top-grid .stat-table th,
@@ -405,6 +409,31 @@ main section .table-wrap + .table-wrap {
   font-weight: 600;
   padding: 0.6rem 0.6rem 0.5rem;
 }
+
+/* Trend: a three-season sparkline and its label; colour repeats what the label says */
+.trend {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+
+.trend svg polyline {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.trend svg circle {
+  fill: currentColor;
+}
+
+.trend-improving { color: #86dba7; }
+.trend-declining { color: #ffb0c2; }
+.trend-none { color: var(--text-3); }
 
 .player-note {
   color: var(--text-3);

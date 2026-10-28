@@ -40,7 +40,17 @@ from scipy.optimize import nnls
 from load_to_database import upload
 
 FIRST_SEASON = 2018  # Pro Football Reference's charted stats start here
-WINDOW_WEIGHTS = [3, 2, 1]  # current season, last season, the season before
+WINDOW_WEIGHTS = [3, 2, 1]  # this season, then the two most recent healthy seasons before it
+HEALTHY_GAMES = 8  # games on defense for a past season to count as healthy
+LOOKBACK_SEASONS = 4  # how far back to look for healthy seasons
+# Trend: players over YOUNG_AGE are Improving if their grade rose every season, Declining if it fell every season,
+# Steady otherwise. Young players get room on the way down (the typical season-to-season change is 20 points):
+# any rise counts as improvement, and so does a season his snap share rose by YOUNG_PLAYING_TIME_RISE (coaches
+# trusting him with more) unless his grade fell by more than YOUNG_DECLINE_MARGIN; a smaller drop counts as no
+# change. A young player is Improving with any improvement and no real drop.
+YOUNG_AGE = 25
+YOUNG_DECLINE_MARGIN = 20
+YOUNG_PLAYING_TIME_RISE = 0.25
 MIN_RELIABILITY = 0.15
 REGULAR_SNAPS = 100  # this season's snaps needed to be in the 0-100 player grade comparison
 # Players under REGULAR_SNAPS this season (hurt, or not yet back) stay listed if they have this many snaps over
@@ -115,11 +125,11 @@ ASSIST_COLUMNS = ["assist_tackle_1_player_id", "assist_tackle_2_player_id",
 # Backtest 2020-2025: each room graded from earlier seasons only, using that season's roster, then compared
 # with the team's result that season (average correlation across the six seasons)
 CONFIDENCE = {
-    "ED": ("Moderate", "Matched overall EPA allowed (r = 0.23) and team sack rate (r = 0.19)"),
-    "IDL": ("Moderate", "Matched team sack rate (r = 0.24)"),
-    "LB": ("Fair", "Matched overall EPA allowed (r = 0.18) and throws to tight ends and running backs (r = 0.15)"),
-    "CB": ("Moderate", "Matched overall EPA allowed (r = 0.22) and outside throws (r = 0.17)"),
-    "S": ("Low", "Matched overall EPA allowed (r = 0.16) and run defense (r = 0.14) only weakly"),
+    "ED": ("Moderate", "Matched overall EPA allowed (r = 0.22) and team sack rate (r = 0.19)"),
+    "IDL": ("Moderate", "Matched team sack rate (r = 0.25)"),
+    "LB": ("Fair", "Matched overall EPA allowed (r = 0.13) and throws to tight ends and running backs (r = 0.12)"),
+    "CB": ("Moderate", "Matched overall EPA allowed (r = 0.25) and outside throws (r = 0.21)"),
+    "S": ("Low", "Matched overall EPA allowed (r = 0.18) and run defense (r = 0.14) only weakly"),
 }
 # This season's team result in each room's main area, and whether a higher number is better
 ROOM_AREA = {
@@ -325,6 +335,10 @@ def build_player_seasons(plays, seasons, rooms):
     team_defense_snaps = (dressed.groupby(["season", "pfr_player_id"])["game_defense_snaps"].sum()
                           .rename("team_defense_snaps").rename_axis(["season", "pfr_id"]))
     players = players.merge(team_defense_snaps, left_on=["season", "pfr_id"], right_index=True, how="left")
+    # Games played on defense that season (every game, charted or not), to tell healthy seasons from injured ones
+    season_games = (snaps.groupby(["season", "pfr_player_id"])["game_id"].nunique()
+                    .rename("season_games").rename_axis(["season", "pfr_id"]))
+    players = players.merge(season_games, left_on=["season", "pfr_id"], right_index=True, how="left")
     return players, team_snaps
 
 
@@ -380,13 +394,31 @@ def estimate_reliability(players, last_complete_season):
     return pd.DataFrame(rows)
 
 
-def score_window(players, method, room, end_season):
-    """Blended rates and z-scores for every player in a room over the three seasons ending at end_season.
-    Returns (blended rates with window snaps, z-scores, each stat's standard deviation)."""
+def select_window(room_players, end_season):
+    """Each player's seasons for the grade: end_season always, then his most recent healthy seasons before it
+    (HEALTHY_GAMES+ games) from the LOOKBACK_SEASONS before, so a season lost to injury is skipped rather than
+    counted. Players without enough healthy seasons fill in with their most recent other ones. end_season is
+    weighted 3 and the earlier seasons 2 and 1; a player who hasn't played in end_season gets only the 2 and 1,
+    so a strong season before an injury isn't promoted to count as much as this one."""
+    now = room_players[room_players["season"] == end_season].assign(weight=WINDOW_WEIGHTS[0])
+    before = room_players[room_players["season"].between(end_season - LOOKBACK_SEASONS, end_season - 1)].copy()
+    before["healthy"] = before["season_games"] >= HEALTHY_GAMES
+    before = before.sort_values(["healthy", "season"], ascending=False)
+    before = before[before.groupby("pfr_id").cumcount() < len(WINDOW_WEIGHTS) - 1]
+    order = before.groupby("pfr_id")["season"].rank(ascending=False, method="first").astype(int)
+    before["weight"] = order.map(dict(enumerate(WINDOW_WEIGHTS)))
+    return pd.concat([now, before])
+
+
+def score_window(players, method, room, end_season, single_season=False):
+    """Blended rates and z-scores for every player in a room over his window ending at end_season (or that
+    season alone). Returns (blended rates with window snaps, z-scores, each stat's standard deviation)."""
     used = method[(method["room"] == room) & method["used"]]
-    window = players[(players["room"] == room)
-                     & players["season"].between(end_season - len(WINDOW_WEIGHTS) + 1, end_season)].copy()
-    window["weight"] = window["season"].map({end_season - i: w for i, w in enumerate(WINDOW_WEIGHTS)})
+    in_room = players[players["room"] == room]
+    if single_season:
+        window = in_room[in_room["season"] == end_season].assign(weight=1)
+    else:
+        window = select_window(in_room, end_season)
     blended = pd.DataFrame({"window_snaps": window.groupby("pfr_id")["defense_snaps"].sum()})
     z = pd.DataFrame(index=blended.index)
     spreads = {}
@@ -399,7 +431,11 @@ def score_window(players, method, room, end_season):
         # The season weights set which seasons count most; the pull toward average uses the actual opportunities,
         # so a player with only this season isn't treated as having three times the sample
         recent_rate = (weighted["e"] / weighted["o"]).fillna(league_rate)
-        blended[stat] = (recent_rate * weighted["raw"] + row["k"] * league_rate) / (weighted["raw"] + row["k"])
+        # A single season (for trends) pulls every player toward average by the same amount, as if each had the
+        # room's typical sample, so a player who missed games isn't pulled harder and made to look like he declined
+        sample = (pd.Series(weighted["raw"][weighted["raw"] > 0].median(), index=weighted.index) if single_season
+                  else weighted["raw"])
+        blended[stat] = (recent_rate * sample + row["k"] * league_rate) / (sample + row["k"])
         # The room's average and spread come from its busier half, so backups don't set the scale
         busy = weighted["raw"] >= weighted["raw"].median()
         spreads[stat] = blended.loc[busy, stat].std()
@@ -502,9 +538,58 @@ def set_weights(method):
     return method
 
 
+def season_trends(players, method, room, season):
+    """Each player's grade in each season of his window on its own (percentile among that season's players in the
+    room with a full sample: HEALTHY_GAMES+ games, or REGULAR_SNAPS+ snaps and half the games so far in a season
+    still being played; every player pulled toward average by the same amount), and whether it rose each time
+    (Improving), fell each time (Declining) or neither (Steady), with more room for young players."""
+    weights = method[(method["room"] == room) & method["used"]].set_index("stat")["weight"]
+    in_room = players[players["room"] == room]
+    points = []
+    for s in range(season - LOOKBACK_SEASONS, season + 1):
+        _, z, _ = score_window(players, method, room, s, single_season=True)
+        composite = (z[weights.index] * weights).sum(axis=1) / weights.sum()
+        rows = in_room[in_room["season"] == s].set_index("pfr_id")
+        if s == season:  # this season counts once he's played half the games so far
+            full = (rows["defense_snaps"] >= REGULAR_SNAPS) & (rows["season_games"] >= rows["season_games"].max() / 2)
+        else:
+            full = rows["season_games"] >= HEALTHY_GAMES
+        scores = composite.loc[composite.index.intersection(rows.index[full])]
+        points.append(pd.DataFrame({"pfr_id": scores.index.to_numpy(), "season": s,
+                                    "season_grade": (scores.rank(pct=True) * 100).round().astype(int).to_numpy(),
+                                    "age": rows.loc[scores.index, "age"].to_numpy(),
+                                    "snap_share": (rows.loc[scores.index, "defense_snaps"]
+                                                   / rows.loc[scores.index, "team_defense_snaps"]).to_numpy()}))
+    points = pd.concat(points).sort_values("season", ascending=False)
+    points = points[points.groupby("pfr_id").cumcount() < len(WINDOW_WEIGHTS)].sort_values("season")
+
+    def step(change, young, snap_rise):
+        """+1 up, -1 down, 0 no real change"""
+        if young:
+            if change < -YOUNG_DECLINE_MARGIN:
+                return -1
+            return 1 if change > 0 or snap_rise >= YOUNG_PLAYING_TIME_RISE else 0
+        return int(np.sign(change))
+
+    def label(p):
+        young = p["age"].iloc[-1] <= YOUNG_AGE
+        steps = [step(c, young, r) for c, r in zip(np.diff(p["season_grade"]), np.diff(p["snap_share"]))]
+        if not steps:
+            return None
+        if young and any(s > 0 for s in steps) and not any(s < 0 for s in steps):
+            return "Improving"
+        return "Improving" if all(s > 0 for s in steps) else "Declining" if all(s < 0 for s in steps) else "Steady"
+
+    by_player = points.groupby("pfr_id")
+    return pd.DataFrame({"trend": by_player[["season_grade", "age", "snap_share"]].apply(label),
+                         "trend_seasons": by_player["season"].apply(lambda s: ",".join(map(str, s))),
+                         "trend_grades": by_player["season_grade"].apply(lambda g: ",".join(map(str, g)))})
+
+
 def grade_players(players, team_snaps, method, season, roster=None):
     """This season's player grades, using each stat's weight from the method table. With this season's roster,
-    players with a track record who have barely played or not played this season (hurt) are added and listed."""
+    players with a track record who have barely played or not played this season (hurt) are added and listed,
+    and each player's season-by-season trend is added (skipped without it, to keep the backtests quick)."""
     current = (team_snaps[team_snaps["season"] == season]
                .merge(players[players["season"] == season]
                       [["pfr_id", "gsis_id", "player", "age", "room", "tackles", "stops"]]
@@ -531,6 +616,8 @@ def grade_players(players, team_snaps, method, season, roster=None):
                                     left_on="team", right_index=True, how="left")
             room_now = pd.concat([room_now, missing[room_now.columns]], ignore_index=True)
             room_now = room_now.merge(roster[["pfr_id", "roster_status"]], on="pfr_id", how="left")
+            room_now = room_now.merge(season_trends(players, method, room, season), left_on="pfr_id",
+                                      right_index=True, how="left")
         room_now = room_now.merge(blended, left_on="pfr_id", right_index=True, how="left")
         room_now["composite"] = room_now["composite"].fillna(0)
         season_snaps = room_now.groupby("pfr_id")["snaps"].transform("sum")
