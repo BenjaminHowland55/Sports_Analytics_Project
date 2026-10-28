@@ -24,6 +24,7 @@ GITHUB_URL = "https://github.com/BenjaminHowland55/Sports_Analytics_Project"
 HOME_CARDS = [
     ("Overall Defense", "epa_per_play_allowed", "EPA per play allowed"),
     ("Pass Defense", "pass_epa_per_dropback_allowed", "EPA per dropback allowed"),
+    ("Rush Defense", "rush_epa_per_carry_allowed", "EPA per carry allowed"),
     ("Pass Rush", "four_man_pressure_rate", "pressure rate with 4 or fewer rushers"),
     ("Coverage", "clean_pocket_epa_allowed", "EPA allowed on clean-pocket dropbacks"),
 ]
