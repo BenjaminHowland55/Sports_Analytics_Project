@@ -40,7 +40,12 @@ from scipy.optimize import nnls
 from load_to_database import upload
 
 FIRST_SEASON = 2018  # Pro Football Reference's charted stats start here
-WINDOW_WEIGHTS = [3, 2, 1]  # this season, then the two most recent healthy seasons before it
+# A player's grade uses this season and his two most recent healthy seasons before it. Each season's weight
+# depends on how many seasons ago it was (this season, last season, 2 ago, 3 ago, 4 ago). Weights also set how
+# much each season counts as evidence when pulling a player toward average (a season 2 ago counts a third as much
+# as this one), so a player whose best play is years old is pulled further toward average.
+SEASON_WEIGHTS = [3, 2, 1, 0.5, 0.25]
+SEASONS_IN_WINDOW = 3
 HEALTHY_GAMES = 8  # games on defense for a past season to count as healthy
 LOOKBACK_SEASONS = 4  # how far back to look for healthy seasons
 # Trend: players over YOUNG_AGE are Improving if their grade rose every season, Declining if it fell every season,
@@ -125,11 +130,11 @@ ASSIST_COLUMNS = ["assist_tackle_1_player_id", "assist_tackle_2_player_id",
 # Backtest 2020-2025: each room graded from earlier seasons only, using that season's roster, then compared
 # with the team's result that season (average correlation across the six seasons)
 CONFIDENCE = {
-    "ED": ("Moderate", "Matched overall EPA allowed (r = 0.22) and team sack rate (r = 0.19)"),
-    "IDL": ("Moderate", "Matched team sack rate (r = 0.25)"),
-    "LB": ("Fair", "Matched overall EPA allowed (r = 0.13) and throws to tight ends and running backs (r = 0.12)"),
+    "ED": ("Moderate", "Matched overall EPA allowed (r = 0.23) and team sack rate (r = 0.19)"),
+    "IDL": ("Moderate", "Matched team sack rate (r = 0.24)"),
+    "LB": ("Fair", "Matched overall EPA allowed (r = 0.14) and throws to tight ends and running backs (r = 0.13)"),
     "CB": ("Moderate", "Matched overall EPA allowed (r = 0.25) and outside throws (r = 0.21)"),
-    "S": ("Low", "Matched overall EPA allowed (r = 0.18) and run defense (r = 0.14) only weakly"),
+    "S": ("Low", "Matched overall EPA allowed (r = 0.16) and run defense (r = 0.13) only weakly"),
 }
 # This season's team result in each room's main area, and whether a higher number is better
 ROOM_AREA = {
@@ -397,17 +402,18 @@ def estimate_reliability(players, last_complete_season):
 def select_window(room_players, end_season):
     """Each player's seasons for the grade: end_season always, then his most recent healthy seasons before it
     (HEALTHY_GAMES+ games) from the LOOKBACK_SEASONS before, so a season lost to injury is skipped rather than
-    counted. Players without enough healthy seasons fill in with their most recent other ones. end_season is
-    weighted 3 and the earlier seasons 2 and 1; a player who hasn't played in end_season gets only the 2 and 1,
-    so a strong season before an injury isn't promoted to count as much as this one."""
-    now = room_players[room_players["season"] == end_season].assign(weight=WINDOW_WEIGHTS[0])
+    counted. Players without enough healthy seasons fill in with their most recent other ones. Each season is
+    weighted by how many seasons ago it was (SEASON_WEIGHTS)."""
+    now = room_players[room_players["season"] == end_season]
     before = room_players[room_players["season"].between(end_season - LOOKBACK_SEASONS, end_season - 1)].copy()
     before["healthy"] = before["season_games"] >= HEALTHY_GAMES
     before = before.sort_values(["healthy", "season"], ascending=False)
-    before = before[before.groupby("pfr_id").cumcount() < len(WINDOW_WEIGHTS) - 1]
-    order = before.groupby("pfr_id")["season"].rank(ascending=False, method="first").astype(int)
-    before["weight"] = order.map(dict(enumerate(WINDOW_WEIGHTS)))
-    return pd.concat([now, before])
+    before = before[before.groupby("pfr_id").cumcount() < SEASONS_IN_WINDOW - 1]
+    window = pd.concat([now, before])
+    # Each season's weight depends on how long ago it was, not its place in the window, so skipping an injured
+    # season doesn't promote an older one to a recent season's weight
+    window["weight"] = (end_season - window["season"]).map(dict(enumerate(SEASON_WEIGHTS)))
+    return window
 
 
 def score_window(players, method, room, end_season, single_season=False):
@@ -425,16 +431,18 @@ def score_window(players, method, room, end_season, single_season=False):
     for _, row in used.iterrows():
         stat = row["stat"]
         weighted = (window.assign(e=window[row["events"]] * window["weight"],
-                                  o=window[row["opportunities"]] * window["weight"], raw=window[row["opportunities"]])
-                    .groupby("pfr_id")[["e", "o", "raw"]].sum())
+                                  o=window[row["opportunities"]] * window["weight"], raw=window[row["opportunities"]],
+                                  evidence=window[row["opportunities"]] * window["weight"] / SEASON_WEIGHTS[0])
+                    .groupby("pfr_id")[["e", "o", "raw", "evidence"]].sum())
         league_rate = window[row["events"]].sum() / window[row["opportunities"]].sum()
-        # The season weights set which seasons count most; the pull toward average uses the actual opportunities,
-        # so a player with only this season isn't treated as having three times the sample
+        # The season weights set which seasons count most. The pull toward average uses the opportunities scaled
+        # by how recent they are (this season's count in full, older ones less), so a player with only this season
+        # isn't treated as having three times the sample, and old play counts as less evidence of today's level.
         recent_rate = (weighted["e"] / weighted["o"]).fillna(league_rate)
         # A single season (for trends) pulls every player toward average by the same amount, as if each had the
         # room's typical sample, so a player who missed games isn't pulled harder and made to look like he declined
         sample = (pd.Series(weighted["raw"][weighted["raw"] > 0].median(), index=weighted.index) if single_season
-                  else weighted["raw"])
+                  else weighted["evidence"])
         blended[stat] = (recent_rate * sample + row["k"] * league_rate) / (sample + row["k"])
         # The room's average and spread come from its busier half, so backups don't set the scale
         busy = weighted["raw"] >= weighted["raw"].median()
@@ -561,7 +569,7 @@ def season_trends(players, method, room, season):
                                     "snap_share": (rows.loc[scores.index, "defense_snaps"]
                                                    / rows.loc[scores.index, "team_defense_snaps"]).to_numpy()}))
     points = pd.concat(points).sort_values("season", ascending=False)
-    points = points[points.groupby("pfr_id").cumcount() < len(WINDOW_WEIGHTS)].sort_values("season")
+    points = points[points.groupby("pfr_id").cumcount() < SEASONS_IN_WINDOW].sort_values("season")
 
     def step(change, young, snap_rise):
         """+1 up, -1 down, 0 no real change"""

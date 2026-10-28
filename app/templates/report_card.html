@@ -67,7 +67,8 @@
   {% if card %}
   <p class="table-note">
     Each of Arizona's five defensive position rooms, graded against the same room on the other 31 teams, and compared
-    with what it costs. Grades blend {{ card.season }} (counted most) with each player's two most recent healthy seasons,
+    with what it costs. Grades blend {{ card.season }} (counted most) with each player's two most recent healthy seasons
+    (older seasons counting less),
     and use only stats that repeat from one season to the next. Rooms are made up of the players who have taken
     defensive snaps for each team in {{ card.season }}. See <a href="#method">How the grades work</a> for every formula.
   </p>
@@ -275,12 +276,17 @@
       </li>
       <li>
         <strong>Three-season blend, pulled toward average.</strong>
-        <code>recent rate = Σ weight × events ÷ Σ weight × opportunities</code>, with weights 3, 2, 1 for this season and the
-        player's two most recent healthy seasons before it (8+ games; a season lost to injury is skipped and an earlier one
-        used, looking back up to four seasons), then <code>blended rate = (recent rate × opportunities + k × league rate) ÷ (opportunities + k)</code>,
-        with <code>k = average opportunities × (1 − r) ÷ r</code>. The noisier a stat, the bigger k, so a small sample is pulled
-        harder toward the league rate. The pull uses the player's actual opportunities, not the weighted ones, so a rookie
-        isn't treated as having three times the sample he has. In testing, this predicted
+        The window is this season plus the player's two most recent healthy seasons before it (8+ games; a season lost to
+        injury is skipped and an earlier one used, looking back up to four seasons). Each season is weighted by how long ago
+        it was: 3 for this season, 2 for last season, 1 for two seasons ago, ½ for three, ¼ for four, so skipping an injured
+        season doesn't promote an older one to a recent season's weight.
+        <code>recent rate = Σ weight × events ÷ Σ weight × opportunities</code>, then
+        <code>blended rate = (recent rate × evidence + k × league rate) ÷ (evidence + k)</code>, where
+        <code>evidence = Σ (weight ÷ 3) × opportunities</code> and <code>k = average opportunities × (1 − r) ÷ r</code>.
+        The noisier a stat, the bigger k, so a small sample is pulled harder toward the league rate. This season's
+        opportunities count in full and older ones less, so a rookie isn't treated as having more sample than he has, and a
+        player whose best play is years old (out injured since) is pulled further toward average. Players who missed most of
+        one or two seasons since 2021 then played on return about where this predicted. In testing, the blend predicted
         the next season better than the last season alone for every stat.
       </li>
       <li>
