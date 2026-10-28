@@ -654,6 +654,24 @@ def grade_players(players, team_snaps, method, season, roster=None):
     return grades
 
 
+def season_only_rooms(players, team_snaps, method, season):
+    """Each team's room score and rank from this season's stats alone (same stats, weights and pull toward
+    average), to show who is playing best right now next to the blended grades."""
+    global SEASONS_IN_WINDOW
+    saved, SEASONS_IN_WINDOW = SEASONS_IN_WINDOW, 1
+    try:
+        grades = grade_players(players, team_snaps, method, season)
+    finally:
+        SEASONS_IN_WINDOW = saved
+    grades = grades[grades["snaps"] > 0]
+    scores = (grades.groupby(["team", "room"])
+              .apply(lambda t: np.average(t["composite"], weights=t["snaps"]), include_groups=False)
+              .rename("season_only_score").reset_index())
+    scores["season_only_rank"] = (scores.groupby("room")["season_only_score"].rank(ascending=False, method="min")
+                                  .astype(int))
+    return scores
+
+
 def team_area_results(plays, season):
     """This season's team result in each room's main area of responsibility."""
     plays = plays[(plays["season"] == season) & plays["epa"].notna()]
@@ -723,7 +741,8 @@ def main():
     grades = (grade_players(players, team_snaps, method, season, load_roster(season))
               .merge(contracts, on="gsis_id", how="left"))
     grades["nickel"] = grades["gsis_id"].isin(load_nickels(season)) & grades["room"].isin(["CB", "S"])
-    rooms_table = grade_rooms(grades, team_area_results(plays, season))
+    rooms_table = (grade_rooms(grades, team_area_results(plays, season))
+                   .merge(season_only_rooms(players, team_snaps, method, season), on=["team", "room"], how="left"))
     grades = grades.astype({"snaps": "int64", "games_played": "int64"})
     upload([("player_grades", grades), ("room_grades", rooms_table), ("grade_stats", method)])
 

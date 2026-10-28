@@ -88,6 +88,9 @@ def get_report_card():
         listed = [dict(r._mapping) for r in conn.execute(text(
             "SELECT * FROM player_grades WHERE listed = 1 ORDER BY composite DESC, snaps DESC"))]
         stats = [dict(r._mapping) for r in conn.execute(text("SELECT * FROM grade_stats"))]
+        epa_ranks = {r.team: r.epa_per_play_allowed_rank for r in conn.execute(text(
+            "SELECT team, epa_per_play_allowed_rank FROM team_defense_history "
+            "WHERE season = (SELECT MAX(season) FROM room_grades)"))}
     if not rooms:
         return None
 
@@ -106,10 +109,25 @@ def get_report_card():
         team = by_team.setdefault(row["team"], {"team": row["team"], "cap_pct": 0.0})
         team[row["room"]] = row["grade_rank"]
         team["cap_pct"] += row["cap_pct"]
+
+    # This season alone: each room's rank, an overall rank from the average of the five room scores, and the
+    # defense's actual EPA rank, so teams playing above or below their players' stats stand out
+    this_season = {}
+    for row in rooms:
+        team = this_season.setdefault(row["team"], {"team": row["team"], "scores": [],
+                                                    "epa_rank": epa_ranks.get(row["team"])})
+        team[row["room"]] = row["season_only_rank"]
+        team["scores"].append(row["season_only_score"])
+    overall = sorted(this_season.values(), key=lambda t: -sum(t["scores"]) / len(t["scores"]))
+    for rank, team in enumerate(overall, start=1):
+        team["overall"] = rank
+    for position, team in enumerate(sorted(overall, key=lambda t: t["team"])):
+        team["alphabetical"] = position  # lets the Team column sort A to Z
     return {
         "season": rooms[0]["season"],
         "arizona": sorted((r for r in rooms if r["team"] == "ARI"), key=lambda r: order[r["room"]]),
         "league": sorted(by_team.values(), key=lambda t: t["team"]),
+        "this_season": overall,
         "players": {room: [p for p in players if p["room"] == room] for room in ROOM_ORDER},
         "top": top,
         "room_names": {r["room"]: r["room_name"] for r in rooms},

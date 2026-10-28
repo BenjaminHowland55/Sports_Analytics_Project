@@ -158,6 +158,43 @@
     </div>
   </section>
 
+  <section aria-labelledby="season-heading">
+    <h2 id="season-heading">{{ card.season }} Only: Who's Playing Best Right Now</h2>
+    <p class="table-note">
+      The same grades built from {{ card.season }} stats alone, with no earlier seasons, so this shows who is playing best
+      this year rather than who has the best players. It's noisier this early in the season. Overall ranks the average
+      of the five room scores. Defense Result is the team's actual rank in EPA per play allowed this season; a team whose
+      result is far better than its overall rank is getting more from its scheme and coaching than its players' stats show.
+      Click a column to sort.
+    </p>
+    <div class="table-wrap">
+      <table class="sortable stat-table">
+        <thead>
+          <tr>
+            <th scope="col"><button type="button">Team</button></th>
+            <th scope="col" class="num" aria-sort="descending"><button type="button">Overall</button></th>
+            {% for room in room_order %}
+            <th scope="col" class="num"><button type="button">{{ room }}</button></th>
+            {% endfor %}
+            <th scope="col" class="num"><button type="button" title="Rank in EPA per play allowed this season">Defense Result</button></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for team in card.this_season %}
+          <tr{% if team.team == "ARI" %} class="highlight-row"{% endif %}>
+            <td data-value="{{ -team.alphabetical }}">{{ team.team }}</td>
+            <td class="num" data-value="{{ -team.overall }}">{{ f.rank(team.overall) }}</td>
+            {% for room in room_order %}
+            <td class="num" data-value="{{ -team[room] }}">{{ f.rank(team[room]) }}</td>
+            {% endfor %}
+            <td class="num" data-value="{{ -(team.epa_rank or 99) }}">{{ f.rank(team.epa_rank) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <section aria-labelledby="top-heading">
     <h2 id="top-heading">The League's Best at Each Position</h2>
     <p class="table-note">
