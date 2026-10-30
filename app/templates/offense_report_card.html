@@ -70,6 +70,79 @@
     </p>
   </section>
 
+  {% if card.lines %}
+  {% set ari_line = card.lines|selectattr("team", "equalto", "ARI")|first %}
+  <section aria-labelledby="line-heading">
+    <h2 id="line-heading">Offensive Lines (Graded as Units)</h2>
+    <p class="table-note">
+      Free data has no individual blocking stats, so each team's line is graded as a whole on {{ card.season }} results.
+      <strong>Pass blocking</strong> = pressure rate allowed (sacks + QB hits per dropback, 50%) and sack rate allowed (50%),
+      each adjusted for the quarterback's average time to throw: a quarterback who holds the ball longer takes more pressure
+      and sacks whatever the line does, so each rate is compared with what's expected at that time to throw (this matched the
+      team's passing results better).
+      <strong>Run blocking</strong> = adjusted line yards (40%: a running back's yards credited to the line in steps, with
+      losses counting 120%, the first 4 yards 100%, yards 5–10 half, and nothing beyond 10), yards before contact per
+      running back carry (30%), and stuff rate (30%: runs stopped at or behind the line). Overall = the average of the two.
+      These stats repeat moderately from season to season (0.28–0.41) and match the team's passing and running EPA well
+      (0.47–0.74). Running backs affect the run numbers too: a strong back gains more before contact.
+    </p>
+    {% if ari_line %}
+    <div class="stat-cards">
+      {% for label, key in [("Overall Line", "line"), ("Pass Blocking", "pass_block"), ("Run Blocking", "run_block")] %}
+      {% set r = ari_line[key ~ "_rank"] %}
+      <article class="stat-card {{ 'tier-top' if r <= 10 else ('tier-mid' if r <= 22 else 'tier-bottom') }}">
+        <h3>Arizona {{ label }}</h3>
+        <p class="stat-card-rank">#{{ r }}<span> of 32</span></p>
+        <p class="stat-card-detail">Last season: #{{ ari_line[key ~ "_rank_last_season"] }}</p>
+        {% if key == "line" %}<p class="stat-card-detail">Cap spent: {{ f.value(ari_line.cap_pct, "pct") }} (#{{ ari_line.spend_rank }} most) · value #{{ ari_line.value_rank }}</p>{% endif %}
+      </article>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <div class="table-wrap">
+      <table class="sortable stat-table">
+        <thead>
+          <tr>
+            <th scope="col"><button type="button">Team</button></th>
+            <th scope="col" class="num" aria-sort="descending"><button type="button">Overall</button></th>
+            <th scope="col" class="num"><button type="button">Pass Block</button></th>
+            <th scope="col" class="num"><button type="button">Run Block</button></th>
+            <th scope="col" class="num"><button type="button" title="Sacks + QB hits per dropback (lower is better)">Pressure Rate</button></th>
+            <th scope="col" class="num"><button type="button" title="Sacks per dropback (lower is better)">Sack Rate</button></th>
+            <th scope="col" class="num"><button type="button" title="Quarterback's average seconds from snap to throw; pass blocking is adjusted for it">Time to Throw</button></th>
+            <th scope="col" class="num"><button type="button">Adj. Line Yards</button></th>
+            <th scope="col" class="num"><button type="button" title="Running back yards before contact per carry">Yards Before Contact</button></th>
+            <th scope="col" class="num"><button type="button" title="Running back runs for 0 or fewer yards (lower is better)">Stuff Rate</button></th>
+            <th scope="col" class="num"><button type="button" title="Cap share of the linemen who have played">Cap Spent</button></th>
+            <th scope="col" class="num"><button type="button" title="Most line grade for the money">Value</button></th>
+            <th scope="col" class="num"><button type="button">Last Season</button></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in card.lines|sort(attribute="team") %}
+          <tr{% if t.team == "ARI" %} class="highlight-row"{% endif %}>
+            <td data-value="{{ -loop.index }}">{{ t.team }}</td>
+            <td class="num" data-value="{{ -t.line_rank }}">{{ f.rank(t.line_rank) }}</td>
+            <td class="num" data-value="{{ -t.pass_block_rank }}">{{ f.rank(t.pass_block_rank) }}</td>
+            <td class="num" data-value="{{ -t.run_block_rank }}">{{ f.rank(t.run_block_rank) }}</td>
+            <td class="num" data-value="{{ -t.pressure_rate }}">{{ f.value(t.pressure_rate, "pct") }}</td>
+            <td class="num" data-value="{{ -t.sack_rate }}">{{ f.value(t.sack_rate, "pct") }}</td>
+            <td class="num" data-value="{{ t.time_to_throw }}">{{ "—" if t.time_to_throw is none else "%.2fs"|format(t.time_to_throw) }}</td>
+            <td class="num" data-value="{{ t.adj_line_yards }}">{{ f.value(t.adj_line_yards, "dec") }}</td>
+            <td class="num" data-value="{{ t.yards_before_contact }}">{{ f.value(t.yards_before_contact, "dec") }}</td>
+            <td class="num" data-value="{{ -t.stuff_rate }}">{{ f.value(t.stuff_rate, "pct") }}</td>
+            <td class="num" data-value="{{ t.cap_pct }}">{{ f.value(t.cap_pct, "pct") }}</td>
+            <td class="num" data-value="{{ -t.value_rank }}">{{ f.rank(t.value_rank) }}</td>
+            <td class="num" data-value="{{ -(t.line_rank_last_season or 99) }}">{{ f.rank(t.line_rank_last_season) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="section-note">Click a column to sort; the first click lists the best first. #1 = best of 32.</p>
+  </section>
+
+  {% endif %}
   <section aria-labelledby="league-heading">
     <h2 id="league-heading">Every Team's Rooms</h2>
     <p class="table-note">Grade rank of each room (#1 = best). Click a column to sort: the first click lists the best first.</p>
@@ -273,9 +346,9 @@
         win probability added mostly reflects which moments a quarterback happened to play in. Tracking and charting stats
         were also tried across the offense (rush yards over expected, separation, yards after the catch over expected,
         contested catches, catchable-ball rate, interception-worthy throws, time to throw, and others) and left out.</li>
-      <li><strong>Offensive line.</strong> Not graded. The free data has no individual blocking stats (who allowed a
-        pressure or missed a block), and grading linemen from their team's results while they were on the field ranked good
-        lines rather than good linemen.</li>
+      <li><strong>Offensive line.</strong> Graded as units, not players: the free data has no individual blocking stats
+        (who allowed a pressure or missed a block), and grading linemen from their team's results while they were on the
+        field ranked good lines rather than good linemen. See "Offensive Lines" above for the formulas.</li>
       <li><strong>Composite, grade, injured players and trend</strong> work exactly as on the defensive Report Card.</li>
     </ol>
     <h3 class="room-heading">Grading a room and its contracts</h3>

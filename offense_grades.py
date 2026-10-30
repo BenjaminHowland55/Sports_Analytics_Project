@@ -3,11 +3,12 @@ position_grades.py grades defenders: each player's stats over this season and hi
 pulled toward average by how much each stat repeats, weighted by what veteran contracts pay for, then rolled up
 into room grades, cap spending and value for all 32 teams.
 
-Offensive linemen aren't graded: the free data has no individual blocking stats, and grading them from their team's
-results on their snaps ranked good lines rather than good linemen.
+Offensive linemen aren't graded individually (the free data has no individual blocking stats, and grading them from
+their team's results on their snaps ranked good lines rather than good linemen). Each team's line is graded as a unit
+on pass and run blocking instead (line_unit_grades).
 
-Run with:  python offense_grades.py   (about 10 minutes; uploads offense_player_grades, offense_room_grades and
-offense_grade_stats)
+Run with:  python offense_grades.py   (about 10 minutes; uploads offense_player_grades, offense_room_grades,
+offense_grade_stats and offense_line_grades)
 """
 import numpy as np
 import pandas as pd
@@ -136,7 +137,8 @@ def use_offense_settings():
 
 def load_offense_plays(seasons):
     columns = ["season", "game_id", "posteam", "play_type", "qb_dropback", "sack", "qb_hit", "rush", "pass_attempt",
-               "epa", "receiver_player_id", "passer_player_id", "complete_pass", "air_yards"]
+               "epa", "receiver_player_id", "passer_player_id", "complete_pass", "air_yards", "rusher_player_id",
+               "yards_gained", "success"]
     return (nfl.load_pbp(seasons=seasons).filter(pl.col("season_type") == "REG").select(columns).to_pandas())
 
 
@@ -237,6 +239,99 @@ def build_player_seasons(plays, seasons, rooms):
     return players, team_snaps
 
 
+# Offensive lines are graded as units (no individual blocking stats exist in the free data). Tested on every team
+# 2018-2025 for how much each stat repeats from season to season and how it matches the team's EPA: sack rate allowed
+# (repeat 0.37, matches pass EPA 0.54) and pressure rate allowed (0.41, 0.44) for pass blocking; adjusted line yards
+# (0.30, matches run EPA 0.74), yards before contact (0.30, 0.58) and stuff rate (0.28, 0.53) for run blocking.
+# Pressure-to-sack rate (mostly the quarterback) and rushing success rate (mostly the back's result) were left out.
+# Pass blocking is adjusted for the quarterback's average time to throw (Next Gen Stats): a quarterback who holds the
+# ball longer takes more pressure (r = 0.25) and sacks (0.23) whatever the line does. Each rate is compared with what
+# the league-wide fit expects at that time to throw; the adjusted rates matched the team's passing EPA better
+# (pressure 0.44 -> 0.47, sacks 0.54 -> 0.57) and predicted next season's slightly better. Adjusting run blocking for
+# stacked (8+ defender) boxes changed nothing (they barely relate to these stats), so it isn't used.
+LINE_PASS_STATS = {"pressure_rate_adj": (0.5, True), "sack_rate_adj": (0.5, True)}  # stat: (weight, lower is better)
+LINE_RUN_STATS = {"adj_line_yards": (0.4, False), "yards_before_contact": (0.3, False), "stuff_rate": (0.3, True)}
+LINE_POSITIONS = ["T", "G", "C", "OT", "OG", "OL"]
+
+
+def line_results(plays, seasons):
+    """Each offense's blocking results by season. Adjusted line yards credit a running back's run to the line in
+    steps: losses count 120%, the first 4 yards 100%, yards 5-10 50%, and nothing beyond 10."""
+    plays = plays[plays["play_type"].isin(["pass", "run"])]
+    dropbacks = plays[plays["qb_dropback"] == 1]
+    pressured = (dropbacks["sack"].fillna(0) + dropbacks["qb_hit"].fillna(0)) > 0
+    positions = nfl.load_players().select(["gsis_id", "position"]).to_pandas().set_index("gsis_id")["position"]
+    runs = plays[(plays["rush"] == 1) & (plays["qb_dropback"] == 0)]
+    back_runs = runs[runs["rusher_player_id"].map(positions).isin(["RB", "FB"])]
+    gained = back_runs["yards_gained"].clip(lower=-20)
+    line_yards = np.where(gained < 0, 1.2 * gained, np.minimum(gained, 4) + 0.5 * np.clip(gained - 4, 0, 6))
+    keys = lambda df: [df["season"], df["posteam"]]
+    pfr = (nfl.load_pfr_advstats(seasons=seasons, stat_type="rush", summary_level="week")
+           .filter(pl.col("game_type") == "REG").to_pandas())
+    pfr_positions = (nfl.load_players().select(["pfr_id", "position"]).drop_nulls().unique("pfr_id").to_pandas()
+                     .set_index("pfr_id")["position"])
+    pfr = pfr[pfr["pfr_player_id"].map(pfr_positions).isin(["RB", "FB"])]
+    contact = pfr.groupby(["season", "team"])[["rushing_yards_before_contact", "carries"]].sum()
+    return pd.DataFrame({
+        "pressure_rate": pressured.groupby(keys(dropbacks)).mean(),
+        "sack_rate": dropbacks["sack"].groupby(keys(dropbacks)).mean(),
+        "adj_line_yards": pd.Series(line_yards, index=back_runs.index).groupby(keys(back_runs)).mean(),
+        "stuff_rate": (back_runs["yards_gained"] <= 0).groupby(keys(back_runs)).mean(),
+        "yards_before_contact": contact["rushing_yards_before_contact"] / contact["carries"],
+    }).rename_axis(["season", "team"])
+
+
+def team_time_to_throw(seasons):
+    """Each offense's average time to throw (seconds), weighting each quarterback's weeks by his attempts."""
+    ngs = (nfl.load_nextgen_stats(seasons=seasons, stat_type="passing")
+           .filter((pl.col("season_type") == "REG") & (pl.col("week") > 0)).to_pandas())
+    ngs = ngs.assign(seconds=ngs["avg_time_to_throw"] * ngs["attempts"], team=ngs["team_abbr"].replace({"LAR": "LA"}))
+    totals = ngs.groupby(["season", "team"])[["seconds", "attempts"]].sum()
+    return (totals["seconds"] / totals["attempts"]).rename("time_to_throw")
+
+
+def line_unit_grades(plays, seasons, season, contracts):
+    """Every team's offensive line this season: pass blocking, run blocking and overall (their average), each a
+    weighted average of the stats' z-scores across the 32 teams, plus last season's ranks, what the line costs, and
+    value for money."""
+    results = line_results(plays, seasons).join(team_time_to_throw(seasons))
+    # Pressure and sack rates relative to what the league-wide fit expects at each offense's time to throw
+    for stat in ["pressure_rate", "sack_rate"]:
+        known = results[[stat, "time_to_throw"]].dropna()
+        slope = np.polyfit(known["time_to_throw"], known[stat], 1)[0]
+        results[stat + "_adj"] = results[stat] - slope * (results["time_to_throw"] - known["time_to_throw"].mean())
+
+    def scores(year):
+        teams = results.loc[year]
+        z = (teams - teams.mean()) / teams.std()
+        part = lambda stats: sum(w * (-z[s] if lower else z[s]) for s, (w, lower) in stats.items())
+        return pd.DataFrame({"pass_block_score": part(LINE_PASS_STATS), "run_block_score": part(LINE_RUN_STATS)})
+
+    now, before = scores(season), scores(season - 1)
+    table = results.loc[season].join(now)
+    table["line_score"] = (table["pass_block_score"] + table["run_block_score"]) / 2
+    rank = lambda col: col.rank(ascending=False, method="min").astype(int)
+    for part in ["pass_block", "run_block"]:
+        table[f"{part}_rank"] = rank(table[f"{part}_score"])
+        table[f"{part}_rank_last_season"] = rank(before[f"{part}_score"]).reindex(table.index)
+    table["line_rank"] = rank(table["line_score"])
+    table["line_rank_last_season"] = rank((before["pass_block_score"] + before["run_block_score"]) / 2).reindex(table.index)
+
+    # Cap spent: the contracts of every lineman who has taken offensive snaps for the team this season
+    snaps = nfl.load_snap_counts(seasons=[season]).filter((pl.col("game_type") == "REG") & (pl.col("offense_snaps") > 0)
+                                                          & pl.col("position").is_in(LINE_POSITIONS)).to_pandas()
+    ids = nfl.load_players().select(["pfr_id", "gsis_id"]).drop_nulls().unique("pfr_id").to_pandas()
+    linemen = (snaps.groupby(["team", "pfr_player_id"])["offense_snaps"].sum().reset_index()
+               .merge(ids, left_on="pfr_player_id", right_on="pfr_id").merge(contracts, on="gsis_id", how="left"))
+    table["cap_pct"] = linemen.groupby("team")["apy_cap_pct"].sum().reindex(table.index).fillna(0)
+    table["apy_millions"] = linemen.groupby("team")["apy"].sum().reindex(table.index).fillna(0)
+    slope, intercept = np.polyfit(table["cap_pct"], table["line_score"], 1)
+    table["value_rank"] = rank(table["line_score"] - (intercept + slope * table["cap_pct"]))
+    table["spend_rank"] = rank(table["cap_pct"])
+    table["season"] = season
+    return table.rename_axis("team").reset_index()
+
+
 def team_area_results(plays, season):
     """This season's team result in each offensive room's main area."""
     plays = plays[(plays["season"] == season) & plays["epa"].notna() & plays["play_type"].isin(["pass", "run"])]
@@ -280,8 +375,10 @@ def main():
                           how="left"))
     rooms_table["team_epa_rank"] = rooms_table["team"].map(areas["all_epa"].rank(ascending=False).astype(int))
     grades = grades.astype({"snaps": "int64", "games_played": "int64"})
+    print("Grading offensive lines as units...")
+    lines = line_unit_grades(plays, seasons, season, contracts)
     upload([("offense_player_grades", grades), ("offense_room_grades", rooms_table),
-            ("offense_grade_stats", grading.grading_caps(method))])
+            ("offense_grade_stats", grading.grading_caps(method)), ("offense_line_grades", lines)])
 
 
 if __name__ == "__main__":

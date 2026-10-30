@@ -101,6 +101,8 @@ def get_report_card(side="defense"):
                 "WHERE season = (SELECT MAX(season) FROM room_grades)"))}
         else:  # the offense table carries each team's rank in EPA per play this season
             epa_ranks = {r["team"]: r["team_epa_rank"] for r in rooms}
+            lines = [dict(r._mapping) for r in conn.execute(text(
+                "SELECT * FROM offense_line_grades ORDER BY line_rank, team"))]
     if not rooms:
         return None
 
@@ -138,6 +140,7 @@ def get_report_card(side="defense"):
         "arizona": sorted((r for r in rooms if r["team"] == "ARI"), key=lambda r: order[r["room"]]),
         "league": sorted(by_team.values(), key=lambda t: t["team"]),
         "this_season": overall,
+        "lines": lines if side == "offense" else None,
         "players": {room: [p for p in players if p["room"] == room] for room in room_order},
         "top": top,
         "room_names": {r["room"]: r["room_name"] for r in rooms},
