@@ -116,7 +116,7 @@ ROOM_AREA = {
 # Backtest 2020-2025: each room graded from earlier seasons only, using that season's roster, then compared with the
 # team's result that season (average correlation across the six seasons)
 CONFIDENCE = {
-    "QB": ("High", "Matched the team's EPA per dropback (r = 0.49) and overall offense (r = 0.48)"),
+    "QB": ("High", "Matched the team's EPA per dropback (r = 0.43, after taking out half the supporting cast's help)"),
     "RB": ("Fair", "Matched the team's run EPA (r = 0.13) and overall offense (r = 0.14)"),
     "WR": ("Moderate", "Matched EPA on throws to receivers (r = 0.32) and overall offense (r = 0.28)"),
     "TE": ("Moderate", "Matched EPA on throws to tight ends (r = 0.30) and overall offense (r = 0.22)"),
@@ -290,23 +290,29 @@ def team_time_to_throw(seasons):
     return (totals["seconds"] / totals["attempts"]).rename("time_to_throw")
 
 
-def line_unit_grades(plays, seasons, season, contracts):
-    """Every team's offensive line this season: pass blocking, run blocking and overall (their average), each a
-    weighted average of the stats' z-scores across the 32 teams, plus last season's ranks, what the line costs, and
-    value for money."""
+def blocking_results(plays, seasons):
+    """line_results plus pressure and sack rates relative to what the league-wide fit expects at each offense's time
+    to throw."""
     results = line_results(plays, seasons).join(team_time_to_throw(seasons))
-    # Pressure and sack rates relative to what the league-wide fit expects at each offense's time to throw
     for stat in ["pressure_rate", "sack_rate"]:
         known = results[[stat, "time_to_throw"]].dropna()
         slope = np.polyfit(known["time_to_throw"], known[stat], 1)[0]
         results[stat + "_adj"] = results[stat] - slope * (results["time_to_throw"] - known["time_to_throw"].mean())
+    return results
 
-    def scores(year):
-        teams = results.loc[year]
-        z = (teams - teams.mean()) / teams.std()
-        part = lambda stats: sum(w * (-z[s] if lower else z[s]) for s, (w, lower) in stats.items())
-        return pd.DataFrame({"pass_block_score": part(LINE_PASS_STATS), "run_block_score": part(LINE_RUN_STATS)})
 
+def block_scores(results, year):
+    """Each team's pass- and run-blocking scores in a season: weighted averages of the stats' z-scores."""
+    teams = results.loc[year]
+    z = (teams - teams.mean()) / teams.std()
+    part = lambda stats: sum(w * (-z[s] if lower else z[s]) for s, (w, lower) in stats.items())
+    return pd.DataFrame({"pass_block_score": part(LINE_PASS_STATS), "run_block_score": part(LINE_RUN_STATS)})
+
+
+def line_unit_grades(results, season, contracts):
+    """Every team's offensive line this season: pass blocking, run blocking and overall (their average), plus last
+    season's ranks, what the line costs, and value for money."""
+    scores = lambda year: block_scores(results, year)
     now, before = scores(season), scores(season - 1)
     table = results.loc[season].join(now)
     table["line_score"] = (table["pass_block_score"] + table["run_block_score"]) / 2
@@ -330,6 +336,65 @@ def line_unit_grades(plays, seasons, season, contracts):
     table["spend_rank"] = rank(table["cap_pct"])
     table["season"] = season
     return table.rename_axis("team").reset_index()
+
+
+# Quarterbacks are graded partly relative to their supporting cast: the team's pass blocking and its receiving weapons
+# (its WR/TE/RB single-season grades, weighted by targets). Across QB seasons since 2019, one standard deviation better
+# weapons added about 0.27 to a quarterback's grade and better blocking about 0.21. Half of that expected boost is taken
+# out: the full amount raised the match with quarterback pay (0.55 -> 0.69) but cost next-season prediction
+# (0.45 -> 0.37), and receivers' grades partly reflect their quarterback; half raised the pay match to 0.61 for a small
+# cost (prediction 0.42, team passing match 0.46 -> 0.43).
+QB_CAST_ADJUSTMENT = 0.5
+
+
+def supporting_cast(players, team_snaps, method, results, seasons):
+    """Each team's receiving weapons and pass blocking by season, both put on the same scale (z-scores across all
+    team-seasons)."""
+    weights = {room: method[(method["room"] == room) & method["used"]].set_index("stat")["weight"]
+               for room in ["WR", "TE", "RB"]}
+    main_team = (team_snaps.sort_values("offense_snaps").drop_duplicates(["season", "pfr_id"], keep="last")
+                 .set_index(["season", "pfr_id"])["team"])
+    weapons = {}
+    for year in seasons:
+        rows = []
+        for room, w in weights.items():
+            _, z, _ = grading.score_window(players, method, room, year, single_season=True)
+            season_rows = players[(players["season"] == year) & (players["room"] == room)].set_index("pfr_id")
+            rows.append(pd.DataFrame({"grade": ((z[w.index] * w).sum(axis=1) / w.sum()).reindex(season_rows.index),
+                                      "targets": season_rows["targets"],
+                                      "team": main_team.loc[year].reindex(season_rows.index)}))
+        rows = pd.concat(rows).dropna()
+        rows = rows[rows["targets"] > 0]
+        weapons[year] = rows.groupby("team").apply(lambda t: np.average(t["grade"], weights=t["targets"]),
+                                                   include_groups=False)
+    blocking = {year: block_scores(results, year)["pass_block_score"] for year in seasons}
+    cast = pd.concat([pd.concat(weapons).rename("weapons"), pd.concat(blocking).rename("blocking")], axis=1)
+    return (cast - cast.mean()) / cast.std(), main_team
+
+
+def quarterback_help(players, team_snaps, method, results, season):
+    """How much each quarterback's grade is expected to be raised by his supporting cast over his grading window
+    (seasons weighted as in the grade), from a fit of quarterbacks' single-season grades on their casts."""
+    seasons = [s for s in results.index.get_level_values("season").unique() if s >= grading.FIRST_SEASON + 1]
+    cast, main_team = supporting_cast(players, team_snaps, method, results, seasons)
+    w = method[(method["room"] == "QB") & method["used"]].set_index("stat")["weight"]
+    rows = []
+    for year in [s for s in seasons if s < season]:
+        _, z, _ = grading.score_window(players, method, "QB", year, single_season=True)
+        qbs = players[(players["season"] == year) & (players["room"] == "QB")
+                      & (players["season_games"] >= grading.HEALTHY_GAMES)].set_index("pfr_id")
+        rows.append(pd.DataFrame({"grade": ((z[w.index] * w).sum(axis=1) / w.sum()).reindex(qbs.index),
+                                  "team": main_team.loc[year].reindex(qbs.index), "season": year})
+                    .join(cast, on=["season", "team"]))
+    fit = pd.concat(rows).dropna()
+    _, weapons_effect, blocking_effect = np.linalg.lstsq(
+        np.column_stack([np.ones(len(fit)), fit["weapons"], fit["blocking"]]), fit["grade"], rcond=None)[0]
+    print(f"Supporting cast: +1 SD weapons = {weapons_effect:+.2f}, +1 SD blocking = {blocking_effect:+.2f} QB grade")
+    window = grading.select_window(players[players["room"] == "QB"], season, "QB")
+    window = window.assign(team=[main_team.get((s, p)) for s, p in zip(window["season"], window["pfr_id"])])
+    window = window.join(cast, on=["season", "team"]).dropna(subset=["weapons", "blocking"])
+    window["help"] = weapons_effect * window["weapons"] + blocking_effect * window["blocking"]
+    return window.groupby("pfr_id").apply(lambda d: np.average(d["help"], weights=d["weight"]), include_groups=False)
 
 
 def team_area_results(plays, season):
@@ -366,6 +431,11 @@ def main():
     print(method[["room", "stat", "year_to_year_r", "used", "weight_share", "share_low", "share_high"]]
           .round(3).to_string(index=False))
 
+    print("Measuring each quarterback's supporting cast...")
+    results = blocking_results(plays, seasons)
+    grading.COMPOSITE_ADJUSTMENTS = {
+        "QB": QB_CAST_ADJUSTMENT * quarterback_help(players, team_snaps, method, results, season)}
+
     print(f"Grading {season} players and rooms...")
     grades = (grading.grade_players(players, team_snaps, method, season, grading.load_roster(season))
               .merge(contracts, on="gsis_id", how="left"))
@@ -376,7 +446,7 @@ def main():
     rooms_table["team_epa_rank"] = rooms_table["team"].map(areas["all_epa"].rank(ascending=False).astype(int))
     grades = grades.astype({"snaps": "int64", "games_played": "int64"})
     print("Grading offensive lines as units...")
-    lines = line_unit_grades(plays, seasons, season, contracts)
+    lines = line_unit_grades(results, season, contracts)
     upload([("offense_player_grades", grades), ("offense_room_grades", rooms_table),
             ("offense_grade_stats", grading.grading_caps(method)), ("offense_line_grades", lines)])
 

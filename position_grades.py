@@ -73,6 +73,9 @@ Z_CAP = 2.0
 # Every room's checks matched capping every stat; lower cut-offs, or no cap at all, hurt linebackers and safeties.
 # None = cap every stat.
 CAP_BELOW_REPEAT = 0.40
+# Amounts subtracted from a room's composite, by pfr_id (offense_grades.py sets quarterbacks' supporting cast); none on
+# defense
+COMPOSITE_ADJUSTMENTS = {}
 # (room, stat) pairs never capped even if they're under the cut-off. Edge rushers' sack rate (r = 0.22) is the core of
 # the job: uncapped, the pay match rose 0.81 -> 0.82 and the team sack-rate backtest 0.19 -> 0.20, with next-season
 # prediction within noise (0.63 -> 0.62). Also uncapping tackles for loss, or every edge stat but forced fumbles and
@@ -470,7 +473,8 @@ def score_window(players, method, room, end_season, single_season=False):
         # The season weights set which seasons count most. The pull toward average uses the opportunities scaled
         # by how recent they are (this season's count in full, older ones less), so a player with only this season
         # isn't treated as having three times the sample, and old play counts as less evidence of today's level.
-        recent_rate = (weighted["e"] / weighted["o"]).fillna(league_rate)
+        # A player with no opportunities (or events but no opportunities) is at the league rate
+        recent_rate = (weighted["e"] / weighted["o"]).replace([np.inf, -np.inf], np.nan).fillna(league_rate)
         # A single season (for trends) pulls every player toward average by the same amount, as if each had the
         # room's typical sample, so a player who missed games isn't pulled harder and made to look like he declined
         sample = (pd.Series(weighted["raw"][weighted["raw"] > 0].median(), index=weighted.index) if single_season
@@ -664,6 +668,8 @@ def grade_players(players, team_snaps, method, season, roster=None):
         blended, z, _ = score_window(players, method, room, season)
         weights = method[(method["room"] == room) & method["used"]].set_index("stat")["weight"]
         blended["composite"] = (z[weights.index] * weights).sum(axis=1) / weights.sum()
+        if room in COMPOSITE_ADJUSTMENTS:  # e.g. quarterbacks' supporting cast (offense_grades.py)
+            blended["composite"] -= COMPOSITE_ADJUSTMENTS[room].reindex(blended.index).fillna(0)
 
         room_now = current[current["room"] == room]
         if roster is not None:
