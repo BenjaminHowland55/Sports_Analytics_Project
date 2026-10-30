@@ -19,6 +19,7 @@
     See <a href="#method">How the grades work</a> for every formula.
   </p>
 
+  {% set ari_line = (card.lines or [])|selectattr("team", "equalto", "ARI")|first %}
   <section aria-labelledby="rooms-heading">
     <h2 id="rooms-heading">{{ card.season }} Room Grades</h2>
     <p class="section-note">#1 = best of 32. Cap spent = the players' yearly contract value as a share of the salary cap.</p>
@@ -32,6 +33,15 @@
         <p class="stat-card-detail">Value for money: #{{ room.value_rank }}</p>
       </article>
       {% endfor %}
+      {% if ari_line %}
+      <article class="stat-card {{ 'tier-top' if ari_line.line_rank <= 10 else ('tier-mid' if ari_line.line_rank <= 22 else 'tier-bottom') }}">
+        <h3>Offensive Line</h3>
+        <p class="stat-card-rank">#{{ ari_line.line_rank }}<span> of 32</span></p>
+        <p class="stat-card-detail">Graded as a unit: pass #{{ ari_line.pass_block_rank }}, run #{{ ari_line.run_block_rank }}</p>
+        <p class="stat-card-detail">Cap spent: {{ f.value(ari_line.cap_pct, "pct") }} (#{{ ari_line.spend_rank }} most)</p>
+        <p class="stat-card-detail">Value for money: #{{ ari_line.value_rank }}</p>
+      </article>
+      {% endif %}
     </div>
 
     <div class="table-wrap">
@@ -61,6 +71,19 @@
             <td class="wrap">{{ room.confidence }}: {{ room.confidence_note }}</td>
           </tr>
           {% endfor %}
+          {% if ari_line %}
+          <tr>
+            <td><a href="#line-heading">Offensive Line</a></td>
+            <td class="num">{{ f.rank(ari_line.line_rank) }}</td>
+            <td class="num">{{ f.value(ari_line.cap_pct, "pct") }}</td>
+            <td class="num">{{ f.value(ari_line.apy_millions, "money") }}</td>
+            <td class="num">#{{ ari_line.spend_rank }}</td>
+            <td class="num">{{ f.rank(ari_line.value_rank) }}</td>
+            <td class="wrap">Pass blocking {{ f.rank(ari_line.pass_block_rank) }} · run blocking {{ f.rank(ari_line.run_block_rank) }}
+              (pressure rate allowed {{ f.value(ari_line.pressure_rate, "pct") }}, stuff rate {{ f.value(ari_line.stuff_rate, "pct") }})</td>
+            <td class="wrap">Graded as a unit from team blocking results, not individual linemen; see Offensive Lines below</td>
+          </tr>
+          {% endif %}
         </tbody>
       </table>
     </div>
@@ -71,7 +94,6 @@
   </section>
 
   {% if card.lines %}
-  {% set ari_line = card.lines|selectattr("team", "equalto", "ARI")|first %}
   <section aria-labelledby="line-heading">
     <h2 id="line-heading">Offensive Lines (Graded as Units)</h2>
     <p class="table-note">
