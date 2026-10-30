@@ -1,0 +1,36 @@
+{# Player-table pieces shared by the defense and offense report cards.
+   Import with: {% from "_players.html" import games, trend, status %} #}
+
+{# Games played this season of the team's games so far #}
+{% macro games(p) -%}
+  {{ p.games_played }}{% if p.team_games %} of {{ p.team_games }}{% endif %}
+{%- endmacro %}
+
+{# Trend: a small line of the player's grade in each window season on its own (0 at the bottom, 100 at the
+   top), plus the label in words so it doesn't rely on colour #}
+{% macro trend(p) -%}
+  {%- if p.trend -%}
+  {%- set seasons = p.trend_seasons.split(",") -%}
+  {%- set grades = p.trend_grades.split(",")|map("int")|list -%}
+  {%- set step = 40 / (grades|length - 1) -%}
+  <span class="trend trend-{{ p.trend|lower }}"
+        title="{% for s in seasons %}{{ s }}: {{ grades[loop.index0] }}{{ ' · ' if not loop.last }}{% endfor %} (grade in each season on its own)">
+    <svg viewBox="-3 -3 46 26" width="46" height="26" aria-hidden="true">
+      <polyline points="{% for g in grades %}{{ loop.index0 * step }},{{ 20 - g / 5 }} {% endfor %}" />
+      {% for g in grades %}<circle cx="{{ loop.index0 * step }}" cy="{{ 20 - g / 5 }}" r="2.2" />{% endfor %}
+    </svg>
+    {{ {"Improving": "▲", "Declining": "▼", "Steady": "▶"}[p.trend] }} {{ p.trend }}
+  </span>
+  {%- else -%}<span class="trend trend-none" title="Needs two seasons with a full sample">—</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{# Tags next to a player's name: nickel (defense only) and proven players held under 100 snaps #}
+{% macro status(p) -%}
+  {%- if p.nickel -%}
+  <span class="player-note" title="Listed at nickel (slot) on his team's depth chart. Shown for reference; grades still compare him with all {{ 'corners' if p.room == 'CB' else 'safeties' }}.">Nickel</span>
+  {%- endif -%}
+  {%- if p.limited -%}
+  <span class="player-note">{{ "Injured reserve" if p.roster_status == "RES" else "Limited this season" }}</span>
+  {%- endif -%}
+{%- endmacro %}

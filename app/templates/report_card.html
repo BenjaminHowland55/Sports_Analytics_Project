@@ -1,54 +1,11 @@
 {% extends "base.html" %}
 {% import "_format.html" as f %}
+{% from "_players.html" import games, trend, status %}
+{% from "_stat_info.html" import defense_stats as stat_info %}
 
 {% block title %}Report Card{% endblock %}
 
 {% block content %}
-  {# stat: (label, number format, formula shown in the method section) #}
-  {% set stat_info = {
-    "stop_rate": ("Stops vs. Expected", "dec", "stops ÷ stops an average player in the room would make in the same run and pass snaps (1.00 = average)"),
-    "sack_rate": ("Sack Rate", "pct", "sacks ÷ pass snaps"),
-    "non_sack_pressure_rate": ("Other Pressure Rate", "pct", "(pressures − sacks) ÷ pass snaps"),
-    "pressure_per_blitz": ("Pressures per Blitz", "pct", "pressures ÷ blitzes"),
-    "tfl_rate": ("Tackle-for-Loss Rate", "pct", "tackles for loss ÷ run snaps"),
-    "missed_tackle_rate": ("Missed Tackle Rate", "pct", "missed tackles ÷ (tackles + missed tackles)"),
-    "yards_per_coverage_snap": ("Yards per Coverage Snap", "dec", "yards allowed ÷ coverage snaps"),
-    "completion_rate": ("Completion % Allowed", "pct", "completions allowed ÷ targets"),
-    "interception_rate": ("Interception Rate", "pct", "interceptions ÷ targets"),
-    "breakup_rate": ("Breakup Rate", "pct", "(passes defended − interceptions) ÷ targets"),
-    "forced_fumble_rate": ("Forced Fumble Rate", "pct", "forced fumbles ÷ defensive snaps"),
-    "snap_share": ("Snap Share", "pct", "player's defensive snaps ÷ the defense's snaps in the games he dressed for"),
-  } %}
-  {# Games played on defense this season, and a tag for proven players held under 100 snaps #}
-  {% macro games(p) -%}
-    {{ p.games_played }}{% if p.team_games %} of {{ p.team_games }}{% endif %}
-  {%- endmacro %}
-  {# Trend: a small line of the player's grade in each window season on its own (0 at the bottom, 100 at the
-     top), plus the label in words so it doesn't rely on colour #}
-  {% macro trend(p) -%}
-    {%- if p.trend -%}
-    {%- set seasons = p.trend_seasons.split(",") -%}
-    {%- set grades = p.trend_grades.split(",")|map("int")|list -%}
-    {%- set step = 40 / (grades|length - 1) -%}
-    <span class="trend trend-{{ p.trend|lower }}"
-          title="{% for s in seasons %}{{ s }}: {{ grades[loop.index0] }}{{ ' · ' if not loop.last }}{% endfor %} (grade in each season on its own)">
-      <svg viewBox="-3 -3 46 26" width="46" height="26" aria-hidden="true">
-        <polyline points="{% for g in grades %}{{ loop.index0 * step }},{{ 20 - g / 5 }} {% endfor %}" />
-        {% for g in grades %}<circle cx="{{ loop.index0 * step }}" cy="{{ 20 - g / 5 }}" r="2.2" />{% endfor %}
-      </svg>
-      {{ {"Improving": "▲", "Declining": "▼", "Steady": "▶"}[p.trend] }} {{ p.trend }}
-    </span>
-    {%- else -%}<span class="trend trend-none" title="Needs two seasons with a full sample">—</span>
-    {%- endif -%}
-  {%- endmacro %}
-  {% macro status(p) -%}
-    {%- if p.nickel -%}
-    <span class="player-note" title="Listed at nickel (slot) on his team's depth chart. Shown for reference; grades still compare him with all {{ 'corners' if p.room == 'CB' else 'safeties' }}.">Nickel</span>
-    {%- endif -%}
-    {%- if p.limited -%}
-    <span class="player-note">{{ "Injured reserve" if p.roster_status == "RES" else "Limited this season" }}</span>
-    {%- endif -%}
-  {%- endmacro %}
   {# event: what the expected-points value is measured against #}
   {% set event_info = {
     "stop": "a stop vs. an average tackled play",
@@ -334,8 +291,13 @@
       <li>
         <strong>z-score.</strong> <code>z = (blended rate − room average) ÷ room standard deviation</code>, using the room's busier half
         to set the average and spread. The sign is flipped for lower-is-better stats, so a positive z is always good.
-        z is capped at ±2, so one stat can't dominate: without the cap, six forced fumbles over three seasons scored +3.5 and
-        put a linebacker at #1 on that alone. The cap made every room's grades match team results the same or better.
+        Noisy stats, ones that repeat from one season to the next with r below 0.40 (forced fumbles, interceptions, breakups,
+        coverage, missed tackles, sack and tackle-for-loss rates), have z capped at ±2, so a few lucky plays can't dominate:
+        without the cap, six forced fumbles over three seasons scored +3.5 and put a linebacker at #1 on that alone.
+        Reliable stats (snap share, stops, non-sack pressures, pressures per blitz) aren't capped, so they can show how far
+        ahead a player really is, and neither is edge rushers' sack rate, the core of the job (uncapping it matched pay and
+        team sack rates better). Capping only the noisy stats matched capping all of them on every check; removing the cap
+        entirely made the linebacker and safety grades worse.
       </li>
       <li>
         <strong>Weights: what the NFL pays for.</strong> For every veteran contract signed since 2019 (rookie deals left out),

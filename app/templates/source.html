@@ -3,6 +3,8 @@
 {% block title %}Source{% endblock %}
 
 {% block content %}
+  {% import "_format.html" as f %}
+  {% from "_stat_info.html" import defense_stats, offense_stats %}
   <p class="eyebrow">Source</p>
   <h1>Where the Data Comes From</h1>
 
@@ -53,8 +55,72 @@
       <li>It matches each play to its charting row (2016 on) and totals everything into one row per defense per season.</li>
       <li>It uploads the result to our database. The Stats page reads Arizona's rows from the <code>team_defense_history</code> table.</li>
       <li>A second script, <code>position_grades.py</code>, builds the Report Card from the player datasets above and uploads it to the <code>player_grades</code>, <code>room_grades</code>, and <code>grade_stats</code> tables. The Report Card page explains every formula.</li>
+      <li>A third script, <code>offense_grades.py</code>, grades offensive players the same way and uploads the
+        <code>offense_player_grades</code>, <code>offense_room_grades</code>, and <code>offense_grade_stats</code> tables for the
+        Offense page.</li>
     </ol>
   </section>
+
+  {% if construction %}
+  <section aria-labelledby="built-heading">
+    <h2 id="built-heading">How the Grades Are Built</h2>
+    <p>
+      Every player grade on the <a href="{{ url_for('report_card') }}">Report Card</a> and
+      <a href="{{ url_for('offense_report_card') }}">Offense</a> pages combines the stats below. <strong>Share of grade</strong>
+      is how much each stat counts, set mostly by what NFL veteran contracts pay for. <strong>Repeat score</strong> is how closely
+      the same player's number matches from one season to the next (1 = identical every year, 0 = no connection), so it shows
+      how much of a stat is skill rather than luck. <strong>Capped</strong> stats are noisy enough that a few lucky plays could
+      make a player look like an extreme outlier, so their score is limited to ±2 standard deviations from average; reliable
+      stats aren't capped. Snap share's weight is capped separately where more of it made the grades match team results worse.
+    </p>
+    <ul>
+      <li>Defense caps stats that repeat below 0.40, except edge rushers' sack rate. Offense caps only stats below 0.20,
+        because offensive stats rest on far more plays per season (a starting quarterback's 500+ dropbacks vs. a defender's few
+        forced fumbles).</li>
+      <li>Cornerbacks: lockdown coverage (yards per coverage snap and completion % allowed) is guaranteed half the grade
+        after snap share. Quarterbacks: efficiency (EPA per play and completion % over expected) is guaranteed half the grade.</li>
+      <li>The full formulas are in "How the Grades Work" at the bottom of each grade page.</li>
+    </ul>
+    {% set room_names = {"ED": "Edge Rushers", "IDL": "Interior Line", "LB": "Linebackers", "CB": "Cornerbacks",
+                         "S": "Safeties", "QB": "Quarterbacks", "RB": "Running Backs", "WR": "Wide Receivers",
+                         "TE": "Tight Ends"} %}
+    {% for side in construction %}
+    {% set labels = defense_stats if side.side == "defense" else offense_stats %}
+    <h3 class="room-heading">{{ side.label }}</h3>
+    <div class="top-grid">
+      {% for room in side.rooms %}
+      <div class="table-wrap">
+        <table class="stat-table">
+          <caption>{{ room_names[room.room] }}</caption>
+          <thead>
+            <tr>
+              <th scope="col">Stat</th>
+              <th scope="col" class="num">Share of Grade</th>
+              <th scope="col" class="num">Repeat Score</th>
+              <th scope="col">Capped</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in room.stats %}
+            <tr>
+              <td class="wrap">{{ labels[s.stat][0] }}{{ " (lower is better)" if s.lower_is_better }}</td>
+              <td class="num">{{ f.value(s.weight_share, "pct") }}</td>
+              <td class="num">{{ f.value(s.year_to_year_r, "dec") }}</td>
+              <td>
+                {%- if s.weight_cap is not none -%}Weight capped at {{ f.value(s.weight_cap, "pct") }}
+                {%- elif s.z_cap is not none -%}Yes (±{{ "%g"|format(s.z_cap) }})
+                {%- else -%}No{%- endif -%}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
 
   <section>
     <h2>What the Stats columns mean</h2>

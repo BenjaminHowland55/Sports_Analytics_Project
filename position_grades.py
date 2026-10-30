@@ -45,6 +45,8 @@ FIRST_SEASON = 2018  # Pro Football Reference's charted stats start here
 # much each season counts as evidence when pulling a player toward average (a season 2 ago counts a third as much
 # as this one), so a player whose best play is years old is pulled further toward average.
 SEASON_WEIGHTS = [3, 2, 1, 0.5, 0.25]
+# Rooms with their own season weights (offense_grades.py gives quarterbacks a lighter current season); none on defense
+ROOM_SEASON_WEIGHTS = {}
 SEASONS_IN_WINDOW = 3
 HEALTHY_GAMES = 8  # games on defense for a past season to count as healthy
 LOOKBACK_SEASONS = 4  # how far back to look for healthy seasons
@@ -66,6 +68,16 @@ MARKET_MIN_SNAPS = 300  # snaps over the three seasons before signing for a cont
 # pulled close together, so dividing by their small spread can turn a few lucky plays (six forced fumbles)
 # into a +3.5 outlier; the cap left every room's match with veteran pay the same or better.
 Z_CAP = 2.0
+# The cap applies only to noisy stats, ones that repeat from season to season less than this (year-to-year r), like
+# forced fumbles and interceptions; reliable ones (snap share, stops, pressures) can show how far ahead a player is.
+# Every room's checks matched capping every stat; lower cut-offs, or no cap at all, hurt linebackers and safeties.
+# None = cap every stat.
+CAP_BELOW_REPEAT = 0.40
+# (room, stat) pairs never capped even if they're under the cut-off. Edge rushers' sack rate (r = 0.22) is the core of
+# the job: uncapped, the pay match rose 0.81 -> 0.82 and the team sack-rate backtest 0.19 -> 0.20, with next-season
+# prediction within noise (0.63 -> 0.62). Also uncapping tackles for loss, or every edge stat but forced fumbles and
+# missed tackles, added nothing.
+NEVER_CAPPED = {("ED", "sack_rate")}
 MARKET_BOOTSTRAPS = 200
 # Stats kept although they repeat less than MIN_RELIABILITY, because two separate checks back them: veteran
 # contracts pay for them, and adding them made the room's grades match team results better in the 2020-2025
@@ -81,6 +93,10 @@ KEPT_DESPITE_LOW_REPEAT = {("LB", "completion_rate"), ("ED", "forced_fumble_rate
 # Within the lockdown stats, and within the rest, stats keep the market's proportions.
 CORNER_LOCKDOWN_STATS = ["yards_per_coverage_snap", "completion_rate"]
 CORNER_LOCKDOWN_SHARE = 0.50
+# Stats guaranteed a share of a room's grade (after snap share), the rest keeping the market's proportions
+GUARANTEED_SHARES = {"CB": (CORNER_LOCKDOWN_STATS, CORNER_LOCKDOWN_SHARE)}
+# Rooms with their own z-score cap, or None for no cap (offense_grades.py uses this); none on defense
+ROOM_Z_CAP = {}
 # Snap share (how much of the defense's snaps a player is trusted to play in the games he dressed for) is what coaches
 # who watch every snap think, and a big part of pay. Uncapped, it put the best-paid players at the top in every
 # room (rank match with veteran pay: edge 0.56 -> 0.84, corners 0.23 -> 0.66, linebackers 0.17 -> 0.68) and
@@ -91,6 +107,10 @@ CORNER_LOCKDOWN_SHARE = 0.50
 # 0.23 -> 0.24) for a small drop in the pay match (0.85 -> 0.81); lower caps kept costing pay match for no gain.
 SNAP_SHARE_CAP = {"ED": 0.35, "IDL": 0.30, "LB": 0.20, "CB": None, "S": 0.20}
 ROOMS = ["ED", "IDL", "LB", "CB", "S"]
+# Columns the shared grading functions read; offense_grades.py points these at its own columns
+SNAPS = "defense_snaps"
+TEAM_SNAPS = "team_defense_snaps"
+SEASON_COUNTS = {"tackles": "season_tackles", "stops": "season_stops"}  # this season's totals shown on the page
 ROOM_NAMES = {"ED": "Edge Rushers", "IDL": "Interior Line", "LB": "Linebackers", "CB": "Cornerbacks", "S": "Safeties"}
 
 # Each stat: (events column, opportunities column, minimum opportunities for the reliability test,
@@ -406,12 +426,12 @@ def estimate_reliability(players, last_complete_season):
             rows.append({"room": room, "stat": stat, "events": events, "opportunities": opps,
                          "lower_is_better": lower_is_better, "event": event, "year_to_year_r": r,
                          "avg_opportunities": n, "k": n * (1 - r) / r if r > 0 else np.nan,
-                         "opportunities_per_snap": complete[opps].sum() / complete["defense_snaps"].sum(),
+                         "opportunities_per_snap": complete[opps].sum() / complete[SNAPS].sum(),
                          "used": bool(r >= MIN_RELIABILITY or (room, stat) in KEPT_DESPITE_LOW_REPEAT)})
     return pd.DataFrame(rows)
 
 
-def select_window(room_players, end_season):
+def select_window(room_players, end_season, room=None):
     """Each player's seasons for the grade: end_season always, then his most recent healthy seasons before it
     (HEALTHY_GAMES+ games) from the LOOKBACK_SEASONS before, so a season lost to injury is skipped rather than
     counted. Players without enough healthy seasons fill in with their most recent other ones. Each season is
@@ -424,7 +444,7 @@ def select_window(room_players, end_season):
     window = pd.concat([now, before])
     # Each season's weight depends on how long ago it was, not its place in the window, so skipping an injured
     # season doesn't promote an older one to a recent season's weight
-    window["weight"] = (end_season - window["season"]).map(dict(enumerate(SEASON_WEIGHTS)))
+    window["weight"] = (end_season - window["season"]).map(dict(enumerate(ROOM_SEASON_WEIGHTS.get(room, SEASON_WEIGHTS))))
     return window
 
 
@@ -436,15 +456,15 @@ def score_window(players, method, room, end_season, single_season=False):
     if single_season:
         window = in_room[in_room["season"] == end_season].assign(weight=1)
     else:
-        window = select_window(in_room, end_season)
-    blended = pd.DataFrame({"window_snaps": window.groupby("pfr_id")["defense_snaps"].sum()})
+        window = select_window(in_room, end_season, room)
+    blended = pd.DataFrame({"window_snaps": window.groupby("pfr_id")[SNAPS].sum()})
     z = pd.DataFrame(index=blended.index)
     spreads = {}
     for _, row in used.iterrows():
         stat = row["stat"]
         weighted = (window.assign(e=window[row["events"]] * window["weight"],
                                   o=window[row["opportunities"]] * window["weight"], raw=window[row["opportunities"]],
-                                  evidence=window[row["opportunities"]] * window["weight"] / SEASON_WEIGHTS[0])
+                                  evidence=window[row["opportunities"]] * window["weight"] / ROOM_SEASON_WEIGHTS.get(room, SEASON_WEIGHTS)[0])
                     .groupby("pfr_id")[["e", "o", "raw", "evidence"]].sum())
         league_rate = window[row["events"]].sum() / window[row["opportunities"]].sum()
         # The season weights set which seasons count most. The pull toward average uses the opportunities scaled
@@ -462,8 +482,27 @@ def score_window(players, method, room, end_season, single_season=False):
         z[stat] = (blended[stat] - blended.loc[busy, stat].mean()) / spreads[stat]
         if row["lower_is_better"]:
             z[stat] = -z[stat]
-        z[stat] = z[stat].clip(-Z_CAP, Z_CAP)
+        cap = z_cap(room, stat, row["year_to_year_r"])
+        if cap is not None:
+            z[stat] = z[stat].clip(-cap, cap)
     return blended, z, spreads
+
+
+def z_cap(room, stat, repeat):
+    """The cap on a stat's z-score, or None if it isn't capped: the room's cap applies only to noisy stats (repeat
+    below CAP_BELOW_REPEAT) not listed in NEVER_CAPPED."""
+    cap = ROOM_Z_CAP.get(room, Z_CAP)
+    noisy = (CAP_BELOW_REPEAT is None or not repeat >= CAP_BELOW_REPEAT) and (room, stat) not in NEVER_CAPPED
+    return cap if noisy else None
+
+
+def grading_caps(method):
+    """Record each stat's z-score cap and snap share's weight cap in the method table, for the site."""
+    method["z_cap"] = [z_cap(room, stat, r) for room, stat, r in
+                       zip(method["room"], method["stat"], method["year_to_year_r"])]
+    method["weight_cap"] = [SNAP_SHARE_CAP.get(room) if stat == "snap_share" else None
+                            for room, stat in zip(method["room"], method["stat"])]
+    return method
 
 
 def add_impact(reliability, players, event_values, season):
@@ -546,10 +585,13 @@ def set_weights(method):
         if SNAP_SHARE_CAP[room] is not None:
             snap = min(snap, SNAP_SHARE_CAP[room])
         rest = market[~is_snap]
-        if room == "CB":
-            lockdown = method.loc[rest.index, "stat"].isin(CORNER_LOCKDOWN_STATS)
-            rest = pd.concat([rest[lockdown] / rest[lockdown].sum() * CORNER_LOCKDOWN_SHARE,
-                              rest[~lockdown] / rest[~lockdown].sum() * (1 - CORNER_LOCKDOWN_SHARE)])
+        if room in GUARANTEED_SHARES:
+            guaranteed_stats, share = GUARANTEED_SHARES[room]
+            guaranteed = method.loc[rest.index, "stat"].isin(guaranteed_stats)
+            if rest[guaranteed].sum() == 0:  # the market gave them nothing: split the guaranteed share evenly
+                rest[guaranteed] = 1
+            rest = pd.concat([rest[guaranteed] / rest[guaranteed].sum() * share,
+                              rest[~guaranteed] / rest[~guaranteed].sum() * (1 - share)])
         else:
             rest = rest / rest.sum()
         method.loc[rest.index, "weight_share"] = rest * (1 - snap)
@@ -571,15 +613,15 @@ def season_trends(players, method, room, season):
         composite = (z[weights.index] * weights).sum(axis=1) / weights.sum()
         rows = in_room[in_room["season"] == s].set_index("pfr_id")
         if s == season:  # this season counts once he's played half the games so far
-            full = (rows["defense_snaps"] >= REGULAR_SNAPS) & (rows["season_games"] >= rows["season_games"].max() / 2)
+            full = (rows[SNAPS] >= REGULAR_SNAPS) & (rows["season_games"] >= rows["season_games"].max() / 2)
         else:
             full = rows["season_games"] >= HEALTHY_GAMES
         scores = composite.loc[composite.index.intersection(rows.index[full])]
         points.append(pd.DataFrame({"pfr_id": scores.index.to_numpy(), "season": s,
                                     "season_grade": (scores.rank(pct=True) * 100).round().astype(int).to_numpy(),
                                     "age": rows.loc[scores.index, "age"].to_numpy(),
-                                    "snap_share": (rows.loc[scores.index, "defense_snaps"]
-                                                   / rows.loc[scores.index, "team_defense_snaps"]).to_numpy()}))
+                                    "snap_share": (rows.loc[scores.index, SNAPS]
+                                                   / rows.loc[scores.index, TEAM_SNAPS]).to_numpy()}))
     points = pd.concat(points).sort_values("season", ascending=False)
     points = points[points.groupby("pfr_id").cumcount() < SEASONS_IN_WINDOW].sort_values("season")
 
@@ -612,9 +654,9 @@ def grade_players(players, team_snaps, method, season, roster=None):
     and each player's season-by-season trend is added (skipped without it, to keep the backtests quick)."""
     current = (team_snaps[team_snaps["season"] == season]
                .merge(players[players["season"] == season]
-                      [["pfr_id", "gsis_id", "player", "age", "room", "tackles", "stops"]]
-                      .rename(columns={"tackles": "season_tackles", "stops": "season_stops"}), on="pfr_id")
-               .rename(columns={"defense_snaps": "snaps"}))
+                      [["pfr_id", "gsis_id", "player", "age", "room", *SEASON_COUNTS]]
+                      .rename(columns=SEASON_COUNTS), on="pfr_id")
+               .rename(columns={SNAPS: "snaps"}))
     latest = players[players["season"] <= season].sort_values("season").drop_duplicates("pfr_id", keep="last")
 
     graded = []
@@ -630,7 +672,7 @@ def grade_players(players, team_snaps, method, season, roster=None):
             missing = (latest[(latest["room"] == room) & latest["pfr_id"].isin(proven)
                               & ~latest["pfr_id"].isin(current["pfr_id"])]
                        .merge(roster[["pfr_id", "team"]], on="pfr_id"))
-            missing = missing.assign(season=season, snaps=0, games_played=0, season_tackles=0, season_stops=0,
+            missing = missing.assign(season=season, snaps=0, games_played=0, **{c: 0 for c in SEASON_COUNTS.values()},
                                      age=missing["age"] + season - missing["season"])
             missing = missing.merge(team_snaps[team_snaps["season"] == season].groupby("team")["team_games"].max(),
                                     left_on="team", right_index=True, how="left")
@@ -744,7 +786,7 @@ def main():
     rooms_table = (grade_rooms(grades, team_area_results(plays, season))
                    .merge(season_only_rooms(players, team_snaps, method, season), on=["team", "room"], how="left"))
     grades = grades.astype({"snaps": "int64", "games_played": "int64"})
-    upload([("player_grades", grades), ("room_grades", rooms_table), ("grade_stats", method)])
+    upload([("player_grades", grades), ("room_grades", rooms_table), ("grade_stats", grading_caps(method))])
 
 
 if __name__ == "__main__":

@@ -75,27 +75,37 @@ def get_home_cards():
 
 
 ROOM_ORDER = ["ED", "IDL", "LB", "CB", "S"]
+OFFENSE_ROOM_ORDER = ["QB", "RB", "WR", "TE"]
 TOP_PLAYERS = 10
+# Each report card's tables (from position_grades.py or offense_grades.py) and room order
+REPORT_CARDS = {
+    "defense": {"tables": "", "rooms": ROOM_ORDER},
+    "offense": {"tables": "offense_", "rooms": OFFENSE_ROOM_ORDER},
+}
 
 
-def get_report_card():
+def get_report_card(side="defense"):
     """Room grades for every team, Arizona's graded players, the league's best at each position, and the
-    stats behind the grades."""
+    stats behind the grades, for the defense or the offense."""
+    prefix, room_order = REPORT_CARDS[side]["tables"], REPORT_CARDS[side]["rooms"]
     with engine.connect() as conn:
-        rooms = [dict(r._mapping) for r in conn.execute(text("SELECT * FROM room_grades"))]
+        rooms = [dict(r._mapping) for r in conn.execute(text(f"SELECT * FROM {prefix}room_grades"))]
         players = [dict(r._mapping) for r in conn.execute(
-            text("SELECT * FROM player_grades WHERE team = 'ARI' ORDER BY snaps DESC"))]
+            text(f"SELECT * FROM {prefix}player_grades WHERE team = 'ARI' ORDER BY snaps DESC"))]
         listed = [dict(r._mapping) for r in conn.execute(text(
-            "SELECT * FROM player_grades WHERE listed = 1 ORDER BY composite DESC, snaps DESC"))]
-        stats = [dict(r._mapping) for r in conn.execute(text("SELECT * FROM grade_stats"))]
-        epa_ranks = {r.team: r.epa_per_play_allowed_rank for r in conn.execute(text(
-            "SELECT team, epa_per_play_allowed_rank FROM team_defense_history "
-            "WHERE season = (SELECT MAX(season) FROM room_grades)"))}
+            f"SELECT * FROM {prefix}player_grades WHERE listed = 1 ORDER BY composite DESC, snaps DESC"))]
+        stats = [dict(r._mapping) for r in conn.execute(text(f"SELECT * FROM {prefix}grade_stats"))]
+        if side == "defense":
+            epa_ranks = {r.team: r.epa_per_play_allowed_rank for r in conn.execute(text(
+                "SELECT team, epa_per_play_allowed_rank FROM team_defense_history "
+                "WHERE season = (SELECT MAX(season) FROM room_grades)"))}
+        else:  # the offense table carries each team's rank in EPA per play this season
+            epa_ranks = {r["team"]: r["team_epa_rank"] for r in rooms}
     if not rooms:
         return None
 
     # A player traded this season has a row per team; rank him once, under the team he's played most for
-    top = {room: [] for room in ROOM_ORDER}
+    top = {room: [] for room in room_order}
     seen = set()
     for p in sorted(listed, key=lambda p: -p["snaps"]):
         if p["pfr_id"] not in seen:
@@ -103,7 +113,7 @@ def get_report_card():
             top[p["room"]].append(p)
     top = {room: sorted(ps, key=lambda p: -p["composite"])[:TOP_PLAYERS] for room, ps in top.items()}
 
-    order = {room: i for i, room in enumerate(ROOM_ORDER)}
+    order = {room: i for i, room in enumerate(room_order)}
     by_team = {}
     for row in rooms:
         team = by_team.setdefault(row["team"], {"team": row["team"], "cap_pct": 0.0})
@@ -128,14 +138,14 @@ def get_report_card():
         "arizona": sorted((r for r in rooms if r["team"] == "ARI"), key=lambda r: order[r["room"]]),
         "league": sorted(by_team.values(), key=lambda t: t["team"]),
         "this_season": overall,
-        "players": {room: [p for p in players if p["room"] == room] for room in ROOM_ORDER},
+        "players": {room: [p for p in players if p["room"] == room] for room in room_order},
         "top": top,
         "room_names": {r["room"]: r["room_name"] for r in rooms},
-        "used_stats": {room: [s["stat"] for s in stats if s["room"] == room and s["used"]] for room in ROOM_ORDER},
+        "used_stats": {room: [s["stat"] for s in stats if s["room"] == room and s["used"]] for room in room_order},
         # Within each room, the biggest weights first and unused stats last
-        "stats": sorted(stats, key=lambda s: (order[s["room"]], -(s["weight_share"] or 0), -s["year_to_year_r"])),
+        "stats": sorted(stats, key=lambda s: (order[s["room"]], -(s["weight_share"] or 0), -(s["year_to_year_r"] or 0))),
         # The market study's sample and fit, one row per room
-        "market": [next(s for s in stats if s["room"] == room) for room in ROOM_ORDER],
+        "market": [next(s for s in stats if s["room"] == room) for room in room_order],
     }
 
 
@@ -194,6 +204,16 @@ def report_card():
     return render_template("report_card.html", card=card, room_order=ROOM_ORDER)
 
 
+@app.route("/offense")
+def offense_report_card():
+    try:
+        card = get_report_card("offense")
+    except SQLAlchemyError:
+        app.logger.exception("Could not load offense report card tables")
+        card = None
+    return render_template("offense_report_card.html", card=card, room_order=OFFENSE_ROOM_ORDER)
+
+
 @app.route("/analysis")
 def analysis():
     return render_template("analysis.html")
@@ -204,9 +224,30 @@ def visualizations():
     return render_template("visualizations.html")
 
 
+def get_grade_construction():
+    """For each side and room, every graded stat's share of the grade, how much it repeats from season to season,
+    and its caps, biggest share first."""
+    sides = []
+    with engine.connect() as conn:
+        for side, label in [("defense", "Defense"), ("offense", "Offense")]:
+            prefix, room_order = REPORT_CARDS[side]["tables"], REPORT_CARDS[side]["rooms"]
+            stats = [dict(r._mapping) for r in conn.execute(text(
+                f"SELECT room, stat, year_to_year_r, weight_share, z_cap, weight_cap, lower_is_better FROM {prefix}grade_stats "
+                "WHERE used = 1 AND weight_share >= 0.005"))]
+            sides.append({"side": side, "label": label, "rooms": [
+                {"room": room, "stats": sorted((s for s in stats if s["room"] == room), key=lambda s: -s["weight_share"])}
+                for room in room_order]})
+    return sides
+
+
 @app.route("/source")
 def source():
-    return render_template("source.html")
+    try:
+        construction = get_grade_construction()
+    except SQLAlchemyError:
+        app.logger.exception("Could not load grade construction tables")
+        construction = None
+    return render_template("source.html", construction=construction)
 
 
 # The old About page became Home; send old links there instead of a 404.

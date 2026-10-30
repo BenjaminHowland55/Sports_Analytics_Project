@@ -1,0 +1,360 @@
+{% extends "base.html" %}
+{% import "_format.html" as f %}
+{% from "_players.html" import games, trend, status %}
+{% from "_stat_info.html" import offense_stats as stat_info %}
+
+{% block title %}Offense{% endblock %}
+
+{% block content %}
+
+  <p class="eyebrow">Offense Report Card</p>
+  <h1>Arizona's Offensive Position Rooms</h1>
+  {% if card %}
+  <p class="table-note">
+    Each of Arizona's four offensive skill-position rooms, graded against the same room on the other 31 teams, and compared
+    with what it costs, built the same way as the <a href="{{ url_for('report_card') }}">defensive Report Card</a>.
+    Grades blend {{ card.season }} (counted most) with each player's two most recent healthy seasons (older seasons counting
+    less), and use only stats that repeat from one season to the next, weighted by what NFL contracts pay for. Rooms are
+    made up of the players who have taken offensive snaps for each team in {{ card.season }}.
+    See <a href="#method">How the grades work</a> for every formula.
+  </p>
+
+  <section aria-labelledby="rooms-heading">
+    <h2 id="rooms-heading">{{ card.season }} Room Grades</h2>
+    <p class="section-note">#1 = best of 32. Cap spent = the players' yearly contract value as a share of the salary cap.</p>
+    <div class="stat-cards">
+      {% for room in card.arizona %}
+      <article class="stat-card {{ 'tier-top' if room.grade_rank <= 10 else ('tier-mid' if room.grade_rank <= 22 else 'tier-bottom') }}">
+        <h3>{{ room.room_name }}</h3>
+        <p class="stat-card-rank">#{{ room.grade_rank }}<span> of 32</span></p>
+        <p class="stat-card-detail">Confidence: <strong>{{ room.confidence }}</strong></p>
+        <p class="stat-card-detail">Cap spent: {{ f.value(room.cap_pct, "pct") }} (#{{ room.spend_rank }} most)</p>
+        <p class="stat-card-detail">Value for money: #{{ room.value_rank }}</p>
+      </article>
+      {% endfor %}
+    </div>
+
+    <div class="table-wrap">
+      <table class="stat-table">
+        <thead>
+          <tr>
+            <th scope="col">Room</th>
+            <th scope="col" class="num">Grade</th>
+            <th scope="col" class="num">Cap Spent</th>
+            <th scope="col" class="num">Spent ($)</th>
+            <th scope="col" class="num">Spend Rank</th>
+            <th scope="col" class="num">Value</th>
+            <th scope="col">This Season's Result in the Room's Area</th>
+            <th scope="col">Confidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for room in card.arizona %}
+          <tr>
+            <td>{{ room.room_name }}</td>
+            <td class="num">{{ f.rank(room.grade_rank) }}</td>
+            <td class="num">{{ f.value(room.cap_pct, "pct") }}</td>
+            <td class="num">{{ f.value(room.apy_millions, "money") }}</td>
+            <td class="num">#{{ room.spend_rank }}</td>
+            <td class="num">{{ f.rank(room.value_rank) }}</td>
+            <td class="wrap">{{ room.area_label }}: {{ f.value(room.area_value, "epa") }} {{ f.rank(room.area_rank) }}</td>
+            <td class="wrap">{{ room.confidence }}: {{ room.confidence_note }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="section-note">
+      Spend rank: #1 = spends the most. Value: #1 = the most grade for the money (see the method below).
+      The area result is this season only and isn't part of the grade.
+    </p>
+  </section>
+
+  <section aria-labelledby="league-heading">
+    <h2 id="league-heading">Every Team's Rooms</h2>
+    <p class="table-note">Grade rank of each room (#1 = best). Click a column to sort: the first click lists the best first.</p>
+    <div class="table-wrap">
+      <table class="sortable stat-table">
+        <thead>
+          <tr>
+            {# Sorting reads data-value; ranks and the alphabetical order are stored as negatives so the first
+               (high to low) click puts #1 and A at the top #}
+            <th scope="col" aria-sort="descending"><button type="button">Team</button></th>
+            {% for room in room_order %}
+            <th scope="col" class="num"><button type="button">{{ room }}</button></th>
+            {% endfor %}
+            <th scope="col" class="num"><button type="button" title="Sum of the four rooms' cap spending">Cap Spent on Skill Players</button></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for team in card.league %}
+          <tr{% if team.team == "ARI" %} class="highlight-row"{% endif %}>
+            <td data-value="{{ -loop.index }}">{{ team.team }}</td>
+            {% for room in room_order %}
+            <td class="num" data-value="{{ -team[room] }}">{{ f.rank(team[room]) }}</td>
+            {% endfor %}
+            <td class="num" data-value="{{ team.cap_pct }}">{{ f.value(team.cap_pct, "pct") }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="season-heading">
+    <h2 id="season-heading">{{ card.season }} Only: Who's Playing Best Right Now</h2>
+    <p class="table-note">
+      The same grades built from {{ card.season }} stats alone, with no earlier seasons, so this shows who is playing best
+      this year rather than who has the best players. It's noisier this early in the season. Overall ranks the average
+      of the four room scores. Offense Result is the team's actual rank in EPA per play this season; a team whose result is
+      far better than its overall rank is getting more from its scheme and play-calling than its players' stats show.
+      Click a column to sort.
+    </p>
+    <div class="table-wrap">
+      <table class="sortable stat-table">
+        <thead>
+          <tr>
+            <th scope="col"><button type="button">Team</button></th>
+            <th scope="col" class="num" aria-sort="descending"><button type="button">Overall</button></th>
+            {% for room in room_order %}
+            <th scope="col" class="num"><button type="button">{{ room }}</button></th>
+            {% endfor %}
+            <th scope="col" class="num"><button type="button" title="Rank in EPA per play this season">Offense Result</button></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for team in card.this_season %}
+          <tr{% if team.team == "ARI" %} class="highlight-row"{% endif %}>
+            <td data-value="{{ -team.alphabetical }}">{{ team.team }}</td>
+            <td class="num" data-value="{{ -team.overall }}">{{ f.rank(team.overall) }}</td>
+            {% for room in room_order %}
+            <td class="num" data-value="{{ -team[room] }}">{{ f.rank(team[room]) }}</td>
+            {% endfor %}
+            <td class="num" data-value="{{ -(team.epa_rank or 99) }}">{{ f.rank(team.epa_rank) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="top-heading">
+    <h2 id="top-heading">The League's Best at Each Position</h2>
+    <p class="table-note">
+      The {{ card.top.values()|first|length }} highest grades in each room. Players with 100+ snaps this season are ranked,
+      along with proven players (800+ snaps over the three seasons) who have been hurt or limited this season, so an
+      injury doesn't drop them off the list. Games = games played on offense of the team's games so far.
+      Trend = the player's grade in each of his last three seasons on its own (hover for the numbers):
+      ▲ Improving if it rose each season, ▼ Declining if it fell each season, ▶ Steady otherwise.
+      Players 25 and under are Improving with any rise in grade or a 25+ point jump in playing time, as long as their
+      grade hasn't fallen more than 20 points.
+    </p>
+    <div class="top-grid">
+      {% for room in room_order %}
+      <div class="table-wrap">
+        <table class="stat-table">
+          <caption>{{ card.room_names[room] }}</caption>
+          <thead>
+            <tr>
+              <th scope="col" class="num">#</th>
+              <th scope="col">Player</th>
+              <th scope="col">Team</th>
+              <th scope="col" class="num">Grade</th>
+              <th scope="col" class="num">Games</th>
+              <th scope="col">Trend</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in card.top[room] %}
+            <tr{% if p.team == "ARI" %} class="highlight-row"{% endif %}>
+              <td class="num">{{ loop.index }}</td>
+              <td>{{ p.player }} {{ status(p) }}</td>
+              <td>{{ p.team }}</td>
+              <td class="num">{{ f.grade(p.grade) }}</td>
+              <td class="num">{{ games(p) }}</td>
+              <td>{{ trend(p) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section aria-labelledby="players-heading">
+    <h2 id="players-heading">Arizona's Players</h2>
+    <p class="table-note">
+      Grade = percentile among every player in the same room with 100+ snaps this season (70+ green, under 30 red).
+      Players hurt for most or all of the season are graded on their track record and tagged.
+      Stat columns are the blended three-season rates, after pulling small samples toward the league average.
+      A dash in the contract columns means no contract on file.
+    </p>
+    {% for room in card.arizona %}
+    {% set used = card.used_stats[room.room] %}
+    <h3 class="room-heading">{{ room.room_name }} {{ f.rank(room.grade_rank) }}</h3>
+    <div class="table-wrap">
+      <table class="stat-table">
+        <thead>
+          <tr>
+            <th scope="col">Player</th>
+            <th scope="col" class="num">Age</th>
+            <th scope="col" class="num">Snaps</th>
+            <th scope="col" class="num" title="Games played on offense of the team's games so far">Games</th>
+            <th scope="col" class="num">Grade</th>
+            <th scope="col">Trend</th>
+            <th scope="col" class="num" title="This season's passing + rushing + receiving yards">Yards</th>
+            <th scope="col" class="num" title="This season's passing + rushing + receiving touchdowns">TDs</th>
+            {% for stat in used %}
+            <th scope="col" class="num">{{ stat_info[stat][0] }}</th>
+            {% endfor %}
+            <th scope="col" class="num">Yearly Value</th>
+            <th scope="col" class="num">Cap %</th>
+            <th scope="col" class="num">Signed Through</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in card.players[room.room] %}
+          <tr>
+            <td>{{ p.player }} {{ status(p) }}</td>
+            <td class="num">{{ f.value(p.age, "count") }}</td>
+            <td class="num">{{ f.value(p.snaps, "count") }}</td>
+            <td class="num">{{ games(p) }}</td>
+            <td class="num">{{ f.grade(p.grade) }}</td>
+            <td>{{ trend(p) }}</td>
+            <td class="num">{{ f.value(p.season_yards, "count") }}</td>
+            <td class="num">{{ f.value(p.season_tds, "count") }}</td>
+            {% for stat in used %}
+            <td class="num">{{ f.value(p[stat], stat_info[stat][1]) }}</td>
+            {% endfor %}
+            <td class="num">{{ f.value(p.apy, "money") }}</td>
+            <td class="num">{{ f.value(p.apy_cap_pct, "pct") }}</td>
+            <td class="num">{{ "—" if p.contract_through is none else p.contract_through|int }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+  </section>
+
+  <section id="method" aria-labelledby="method-heading">
+    <h2 id="method-heading">How the Grades Work</h2>
+    <p class="table-note">
+      The offense is graded the same way as the defense; the <a href="{{ url_for('report_card') }}#method">defensive
+      Report Card</a> has each formula in full. In short:
+    </p>
+    <ol>
+      <li><strong>Stats.</strong> Each stat is events ÷ opportunities (table below), used only if it measures part of the
+        room's job and repeats for the same player from one season to the next with a correlation of at least 0.15, with
+        the exceptions noted. Shares (carries, targets, air yards) are the offensive version of tackles: the volume a team
+        trusts a player with, counted in the games he played.</li>
+      <li><strong>Blend.</strong> This season plus the player's two most recent healthy seasons (8+ games), weighted 3, 2, 1
+        by how many seasons ago (½ and ¼ further back), and pulled toward the league rate by
+        <code>k = average opportunities × (1 − r) ÷ r</code>, with older seasons counting as less evidence.</li>
+      <li><strong>z-score</strong> against the room's busier half, sign flipped for lower-is-better stats. Only the
+        noisiest stats (repeat r below 0.20: interception rate, rushing EPA, fumbles and touchdown rates) are capped at ±2.
+        Capping everything tied the best players on stats they're reliably far ahead on (a tight end with 29% of his team's
+        targets got the same credit as one with 21%). Most offensive per-play stats repeat around 0.2–0.4, so the defense's
+        0.40 cut-off would cap nearly all of them; 0.20 kept every check the same as no cap.</li>
+      <li><strong>Weights: what the NFL pays for.</strong> Every veteran contract signed since 2019 (rookie deals left out)
+        is compared with the player's z-scores from the three seasons before signing; a regression holding age fixed, with
+        weights kept from going negative, gives each stat's share. 200 resamples give the 90% range.</li>
+      <li><strong>Quarterbacks.</strong> Pay alone put about 60% of the grade on touchdown, interception and sack rates, which
+        swing from season to season and lean on the line and play-calling. So efficiency (EPA per play and completion % over
+        expected) is guaranteed half the grade, with the rest keeping the market's proportions. EPA per play combines passing
+        and rushing over all of a quarterback's plays, so running counts by its real volume rather than equal to passing.
+        Snap share is left out (starters play nearly every snap, so it mostly measured being rested in blowouts), and this
+        season counts 2.5 instead of 3,
+        since seven games is a small sample at the most important position. Average depth of target and deep-ball accuracy
+        are included; they made every check slightly better. Adjusting EPA for pressure faced and receivers' yards after the
+        catch was tested and left out (it predicted the next season worse), and so were clutch stats: EPA late in close
+        games barely repeats from season to season, EPA on third and fourth down added nothing pay didn't already see, and
+        win probability added mostly reflects which moments a quarterback happened to play in. Tracking and charting stats
+        were also tried across the offense (rush yards over expected, separation, yards after the catch over expected,
+        contested catches, catchable-ball rate, interception-worthy throws, time to throw, and others) and left out.</li>
+      <li><strong>Offensive line.</strong> Not graded. The free data has no individual blocking stats (who allowed a
+        pressure or missed a block), and grading linemen from their team's results while they were on the field ranked good
+        lines rather than good linemen.</li>
+      <li><strong>Composite, grade, injured players and trend</strong> work exactly as on the defensive Report Card.</li>
+    </ol>
+    <h3 class="room-heading">Grading a room and its contracts</h3>
+    <ol>
+      <li><strong>Room score</strong> = the snap-weighted average composite of everyone who has played in the room this season.</li>
+      <li><strong>Cap spent</strong>, <strong>value</strong> and <strong>confidence</strong> work as on the defensive Report Card,
+        with each room's confidence from grading 2020–2025 rooms from earlier seasons and comparing with the team's actual
+        results in that room's area and overall.</li>
+      <li><strong>Rooms.</strong> Players are placed by their Over The Cap contract position (fullbacks with running backs), or their roster position if there's no contract.</li>
+    </ol>
+
+    <div class="table-wrap">
+      <table class="stat-table">
+        <thead>
+          <tr>
+            <th scope="col">Room</th>
+            <th scope="col">Stat</th>
+            <th scope="col">Formula</th>
+            <th scope="col" class="num">Year-to-Year r</th>
+            <th scope="col" class="num">k</th>
+            <th scope="col" class="num" title="Extra yearly pay, as a share of the cap, for one standard deviation better">Market Pay per SD</th>
+            <th scope="col" class="num" title="Share of pay explained by this stat, from the market study">Market Weight</th>
+            <th scope="col" class="num" title="90% range of the market weight across 200 resamples of the contracts">Market 90% Range</th>
+            <th scope="col" class="num" title="Share of the room's composite score">Weight Used</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in card.stats %}
+          <tr>
+            <td>{{ s.room }}</td>
+            <td class="wrap">
+              {{ stat_info[s.stat][0] }}{{ " (lower is better)" if s.lower_is_better }}
+              {% if s.used and s.year_to_year_r < 0.15 %}<br><span class="in-progress">Kept despite a low repeat: an impact play teams pay for, and a large k keeps small samples near average</span>{% endif %}
+            </td>
+            <td class="wrap">{{ stat_info[s.stat][2] }}</td>
+            <td class="num">{{ f.value(s.year_to_year_r, "dec") }}</td>
+            {% if s.used %}
+            <td class="num">{{ f.value(s.k, "count") }}</td>
+            <td class="num">+{{ "%.2f"|format(s.market_cap_pct_per_sd) }}% of cap</td>
+            <td class="num">{{ f.value(s.market_share, "pct") }}</td>
+            <td class="num">{{ "%.0f"|format(s.share_low * 100) }}–{{ "%.0f"|format(s.share_high * 100) }}%</td>
+            <td class="num"><strong>{{ f.value(s.weight_share, "pct") }}</strong></td>
+            {% else %}
+            <td class="num" colspan="5">Not used: repeats too little to tell skill from luck</td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <h3 class="room-heading">What the market study is based on</h3>
+    <div class="table-wrap">
+      <table class="stat-table">
+        <thead>
+          <tr>
+            <th scope="col">Room</th>
+            <th scope="col" class="num">Veteran Contracts</th>
+            <th scope="col" class="num" title="Share explained once the stats are added">Pay Explained by the Stats</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in card.market %}
+          <tr>
+            <td>{{ m.room }}</td>
+            <td class="num">{{ f.value(m.market_contracts, "count") }}</td>
+            <td class="num">{{ f.value(m.market_r2_with_stats, "pct") }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="section-note">
+      Contracts signed 2019 on by players with 300+ snaps in the three seasons before signing. Quarterback and receiver
+      stats depend heavily on each other and on the offense around them (play-calling, the line, the other weapons), so
+      treat any single player's grade as part of a unit, not a verdict on him alone.
+    </p>
+  </section>
+  <script src="{{ url_for('static', filename='sort-table.js') }}" defer></script>
+  {% else %}
+  <p>No data available right now.</p>
+  {% endif %}
+{% endblock %}
